@@ -50,3 +50,9 @@ hide a newer version that does exist.
   version that still runs `claude plugin test` is a week old.
 - A person running the same gates locally can use an unpinned `typescript`;
   only CI is pinned.
+
+Note, 2026-09-17: this repository ran the credential check after this note
+was written. A new clone, an empty `HOME`, and only `PATH` and `USER` set:
+`/plugin-types`, validate, `tsc` and the plugin tests all passed with the
+2.1.273 native binary. The npm package of that version was not tested
+here, because a local package-age guard hid it from `npm install`.
