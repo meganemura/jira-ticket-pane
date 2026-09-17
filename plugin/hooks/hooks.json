@@ -1,0 +1,4 @@
+{
+  "description": "One function-hooks module: /jira fetches one Jira issue by key through the session's own MCP server and draws it in a pane beside the transcript; a press on the pane arms the issue text to ride the next prompt as context.",
+  "modules": ["./mod.ts"]
+}
