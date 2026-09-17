@@ -17,11 +17,28 @@ A button on the pane arms the issue text to ride the next prompt as context.
 ## Install
 
 ```sh
-git clone <repository URL>
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir "<clone>/plugin"
+claude plugin marketplace add meganemura/jira-ticket-pane
+claude plugin install jira-ticket-pane@jira-ticket-pane
 ```
 
-The repository has no public URL yet.
+The repository is private today, so these commands need access to it.
+
+To develop against a checkout, run the plugin from its working tree:
+
+```sh
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/jira-ticket-pane/plugin
+```
+
+To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
+`env` of `settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
 
 ## `/jira`
 

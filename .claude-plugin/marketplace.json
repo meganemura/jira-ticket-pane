@@ -1,0 +1,12 @@
+{
+  "name": "jira-ticket-pane",
+  "description": "A pane beside the transcript that shows one Jira issue.",
+  "owner": { "name": "meganemura" },
+  "plugins": [
+    {
+      "name": "jira-ticket-pane",
+      "source": "./plugin",
+      "description": "A pane beside the transcript that fetches one Jira issue by key and lets you attach it to your next prompt."
+    }
+  ]
+}
