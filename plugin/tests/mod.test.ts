@@ -43,7 +43,7 @@ type McpCall = { server: string; tool: string; args: Record<string, unknown> }
 
 type WorldOptions = {
   tools?: ToolInfo[]
-  mcp?: (call: McpCall) => McpToolResult
+  mcp?: (call: McpCall) => McpToolResult | Promise<McpToolResult>
   files?: Record<string, string>
   store?: Record<string, unknown>
   env?: Record<string, string>
@@ -63,9 +63,11 @@ function world(on: On, options: WorldOptions = {}) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
 
-  on('mcp.call', ($, e) => {
+  // `options.mcp` can answer with a Promise a test resolves by hand, to script the order two
+  // concurrent fetches land in.
+  on('mcp.call', async ($, e) => {
     mcpCalls.push({ server: e.server, tool: e.tool, args: e.args })
-    const answer = options.mcp?.({ server: e.server, tool: e.tool, args: e.args })
+    const answer = await options.mcp?.({ server: e.server, tool: e.tool, args: e.args })
     return { value: answer ?? { content: [], isError: true } }
   })
 
@@ -187,6 +189,41 @@ describe('mod', () => {
     const text = textOf(await $.ui.render(PANE))
     expect(text).toContain('error: key')
     expect(text).not.toContain('error: issueKey')
+  })
+
+  test('a stale fetch does not overwrite the pane once a newer fetch for another key has landed', async ($, on) => {
+    // Held in an array rather than a plain nullable variable: TypeScript's flow analysis does
+    // not see through an assignment made inside the Promise executor closure below.
+    const resolvers: Array<(result: McpToolResult) => void> = []
+    world(on, {
+      tools: TOOLS,
+      mcp: ({ args }) => {
+        if (args['issueKey'] === 'DEMO-1') return new Promise<McpToolResult>((resolve) => resolvers.push(resolve))
+        return { content: [{ type: 'text', text: `${String(args['issueKey'])}: content` }], isError: false }
+      },
+    })
+    await $.session.start(SESSION)
+
+    const run1 = $.command.run({ ...RUN, args: 'DEMO-1' })
+    await $.command.run({ ...RUN, args: 'DEMO-2' })
+
+    resolvers[0]?.({ content: [{ type: 'text', text: 'DEMO-1: content' }], isError: false })
+    await run1
+    await settle()
+
+    const text = textOf(await $.ui.render(PANE))
+    expect(text).toContain('DEMO-2: content')
+    expect(text).not.toContain('DEMO-1: content')
+  })
+
+  test('an isError result with no text falls back to a line naming the server and tool, with a dim called line', async ($, on) => {
+    world(on, { tools: TOOLS })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const text = textOf(await $.ui.render(PANE))
+    expect(text).toContain('the tool answered isError with no text (server atlassian, tool getJiraIssue)')
+    expect(text).toContain('called getJiraIssue on atlassian with key')
   })
 
   test('no candidate MCP tool lists only the connected MCP tools, not a built-in one', async ($, on) => {

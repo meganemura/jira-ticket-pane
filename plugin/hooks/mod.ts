@@ -1,12 +1,13 @@
 // The plugin's one function-hooks module. `/jira <KEY>` fetches one Jira issue through an MCP
-// server the session already has (`$.mcp.call`, never a model turn) and draws it in a pane
-// beside the transcript. A press on the pane's attach button arms the issue text to ride the
-// person's next prompt as context, the same way the model reads any other attached text.
+// server the session already has, calling `$.mcp.call` directly inside this hook, and draws it
+// in a pane beside the transcript. A press on the pane's attach button arms the issue text to
+// ride the person's next prompt as context, the same way the model reads any other attached text.
 //
-// Must NOT know about: which MCP server serves Jira (discovered from `$.tool.list()`, or set
-// once with `/jira config`, never hard-coded); writing back to Jira; a poll timer; drag-select
-// over the issue text (a later milestone); field-by-field rendering of `structuredContent` (it
-// is shown as raw JSON, folded, not laid out).
+// Must NOT know about: which MCP server serves Jira (learned from `$.tool.list()`, or pinned
+// once with `/jira config`); writing back to Jira; a poll timer (an issue does not change
+// minute to minute, so one refresh press stays enough); drag-select over the issue text (a
+// later milestone); field-by-field rendering of `structuredContent` (shown as raw JSON behind a
+// fold, collapsed until pressed open).
 //
 // It loads only where Claude Code has function hooks enabled. The engine's validator reads this
 // file statically, so every call on `$` is spelled `$.noun.event(...)` and `$` is handed only to
@@ -22,11 +23,13 @@ const COMMAND = 'jira'
 const KEY_RE = /^[A-Z][A-Z0-9]+-\d+$/
 
 // Jira MCP tools spell the issue key argument differently server to server; tried in order
-// until one answers `isError: false`.
+// until one answers `isError: false`. This order is a guess: no real Atlassian MCP server's
+// argument name has been confirmed against this file yet.
 const ARG_NAMES = ['issueKey', 'issueIdOrKey', 'key']
 
-// `prompt.submit`'s `context` is capped at this many characters total, across every entry it
-// carries (the d.ts states the cap; matched here rather than discovered by a rejected prompt).
+// `PROMPT_CONTEXT_MAX_CHARS` copies the cap the d.ts states for `prompt.submit`'s `context`, so
+// `fittedContextTextOf` can size an attachment up front, without spending a prompt just to learn
+// the number by its rejection.
 const PROMPT_CONTEXT_MAX_CHARS = 32_000
 const CONTEXT_CUT_NOTE = '(The rest of this issue was cut: it did not fit in the prompt.)'
 
@@ -58,15 +61,18 @@ type State = {
   result: McpToolResult | null
   error: string | null
   toolNames: string[]
+  lastCall: string | null
   config: McpConfig | null
   isLoading: boolean
   fetchedAt: string | null
   isStructuredOpen: boolean
   armed: Armed | null
+  fetchSeq: number
 }
 
-// The host is a bundle of closures over `$`, built once at `session.start`, so the rest of this
-// file never holds `$` itself. That is the validator's rule and also the seam a test fakes:
+// The host is a bundle of closures over `$`, built once at `session.start`: `$` stays inside
+// `hostOf` and the function declarations at the top of the file the validator reads, and the
+// rest of the module works through this `Host`. That boundary is also the seam a test fakes:
 // every world a test builds stubs these same calls with `on(...)`.
 function hostOf($: any): Host {
   return {
@@ -89,9 +95,8 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-// What came out of the store is code's own past write, not the engine's word: validated before
-// anything trusts its shape, since a version of this file that has since changed the shape could
-// still be sitting there.
+// The store holds this file's own past write, and an earlier version of this file may have saved
+// a different shape; configFromStore checks each field before state trusts it as an McpConfig.
 function configFromStore(value: unknown): McpConfig | null {
   if (typeof value !== 'object' || value === null) return null
   const server = Reflect.get(value, 'server')
@@ -100,9 +105,9 @@ function configFromStore(value: unknown): McpConfig | null {
   return { server, tool }
 }
 
-// A fixture file is this file's own past write too (by whoever set up the fixture), not the
-// engine's word: the two fields fetchIssue reads off it (`content`, `isError`) are checked
-// before anything trusts the rest.
+// A person writes a fixture file, so its shape is unchecked until here: the two fields
+// fetchFromFixture reads off it, `content` and `isError`, are checked before anything trusts the
+// rest.
 function mcpResultOf(value: unknown): McpToolResult | null {
   if (typeof value !== 'object' || value === null) return null
   const content = Reflect.get(value, 'content')
@@ -112,8 +117,9 @@ function mcpResultOf(value: unknown): McpToolResult | null {
   return { content, isError, ...(structuredContent === undefined ? {} : { structuredContent }) }
 }
 
-// An MCP tool name is `mcp__<server>__<tool>`; the tool name itself may contain `__`, so this
-// cuts at the first `__` past the prefix rather than splitting on every one.
+// An MCP tool name is `mcp__<server>__<tool>`, and the tool name itself may contain `__`;
+// parsedToolNameOf cuts only at the first `__` past the prefix, so the rest of the name stays
+// whole as the tool.
 function parsedToolNameOf(name: string): McpConfig | null {
   const prefix = 'mcp__'
   if (!name.startsWith(prefix)) return null
@@ -127,9 +133,9 @@ function parsedToolNameOf(name: string): McpConfig | null {
 }
 
 // A Jira "get one issue" tool, guessed from its name alone: connected, about Jira, about an
-// issue, and reads rather than writes. Of several candidates the shortest name wins (a plainer
-// name reads as the more likely single-purpose tool); ties keep the order `$.tool.list()` gave,
-// since `Array.prototype.sort` is stable.
+// issue, and named with a read verb (get, fetch, read or show). Of several candidates the
+// shortest name wins (a plainer name reads as the more likely single-purpose tool); ties keep
+// the order `$.tool.list()` gave, since `Array.prototype.sort` is stable.
 export function discoverTool(tools: ToolInfo[]): McpConfig | null {
   const candidates = tools
     .filter((tool) => tool.mcp && /jira/i.test(tool.name) && /issue/i.test(tool.name) && /get|fetch|read|show/i.test(tool.name))
@@ -159,9 +165,9 @@ export function contextTextOf(key: string, text: string): string {
   return [header, ...quoted].join('\n')
 }
 
-// Whole when it fits the context room left, else as many whole lines as fit plus a cut note —
-// never a line sliced mid-word. `undefined` when not even the header fits, so the caller can
-// drop the attach instead of sending a note with no body.
+// Whole when it fits the context room left, else as many whole lines as fit plus a cut note; a
+// kept line is always whole, cut only between lines. `undefined` when not even the header fits,
+// so the caller drops the attach; a note with no body under it would tell the model nothing.
 export function fittedContextTextOf(text: string, room: number): string | undefined {
   if (text.length <= room) return text
   const kept: string[] = []
@@ -176,97 +182,110 @@ export function fittedContextTextOf(text: string, room: number): string | undefi
   return hasBody ? `${kept.join('\n')}\n${CONTEXT_CUT_NOTE}` : undefined
 }
 
+// What a fetch found, kept out of `state` until the caller knows this is still the fetch that
+// gets to write it (a `fetchIssue` for an older key can land after a newer one).
+type FetchOutcome = {
+  result: McpToolResult | null
+  error: string | null
+  toolNames: string[]
+  lastCall: string | null
+}
+
 // Fetches `key` into `state`, from a fixture file when `JIRA_TICKET_PANE_FIXTURE` names a
-// directory, else from the connected MCP server. `isLoading` and `fetchedAt` bracket every
-// path, success or failure, so the refresh button's label always reflects what just happened.
+// directory, else from the connected MCP server. Refresh, or a fast run of `/jira <KEY>`, can
+// start a second fetch before the first one lands. `fetchSeq` numbers each attempt; `fetchIssue`
+// compares its own number to the one currently in `state` before it writes `result`, `error`,
+// `toolNames`, `lastCall`, `isLoading` or `fetchedAt`, so a late answer from an older fetch
+// leaves standing whatever a newer fetch already wrote.
 async function fetchIssue(state: State, key: string): Promise<void> {
   const host = state.host
   if (host === null) return
+  const seq = ++state.fetchSeq
   state.isLoading = true
+  state.result = null
+  state.error = null
+  state.toolNames = []
+  state.lastCall = null
   host.invalidate()
   try {
     const dir = await host.envFixture()
-    if (dir !== undefined && dir !== '') {
-      await fetchFromFixture(state, host, dir, key)
-    } else {
-      await fetchFromMcp(state, host, key)
+    const outcome = dir !== undefined && dir !== '' ? await fetchFromFixture(host, dir, key) : await fetchFromMcp(host, state.config, key)
+    if (seq === state.fetchSeq) {
+      state.result = outcome.result
+      state.error = outcome.error
+      state.toolNames = outcome.toolNames
+      state.lastCall = outcome.lastCall
     }
   } finally {
-    state.isLoading = false
-    state.fetchedAt = new Date().toLocaleTimeString()
+    if (seq === state.fetchSeq) {
+      state.isLoading = false
+      state.fetchedAt = new Date().toLocaleTimeString()
+    }
     host.invalidate()
   }
 }
 
 // Fixture mode never calls `mcp.call` or `tool.list`: a fixture stands in for both the
 // discovery and the call, for local development with no MCP server connected.
-async function fetchFromFixture(state: State, host: Host, dir: string, key: string): Promise<void> {
-  state.result = null
-  state.error = null
-  state.toolNames = []
+async function fetchFromFixture(host: Host, dir: string, key: string): Promise<FetchOutcome> {
   const path = `${dir}/${key}.json`
   let text: string
   try {
     text = await host.fsRead(path)
   } catch (error) {
-    state.error = `jira-ticket-pane: could not read ${path}: ${messageOf(error)}`
-    return
+    return { result: null, error: `jira-ticket-pane: could not read ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null }
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch (error) {
-    state.error = `jira-ticket-pane: could not parse ${path}: ${messageOf(error)}`
-    return
+    return { result: null, error: `jira-ticket-pane: could not parse ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null }
   }
   const result = mcpResultOf(parsed)
-  if (result === null) {
-    state.error = `jira-ticket-pane: ${path} is not a Jira MCP tool result`
-    return
-  }
-  state.result = result
+  if (result === null) return { result: null, error: `jira-ticket-pane: ${path} is not a Jira MCP tool result`, toolNames: [], lastCall: null }
+  return { result, error: null, toolNames: [], lastCall: null }
 }
 
-async function fetchFromMcp(state: State, host: Host, key: string): Promise<void> {
-  state.result = null
-  state.error = null
-  state.toolNames = []
-
-  let config = state.config
-  if (config === null) {
+async function fetchFromMcp(host: Host, config: McpConfig | null, key: string): Promise<FetchOutcome> {
+  let resolved = config
+  if (resolved === null) {
     const tools = await host.toolList()
     const discovered = discoverTool(tools)
     if (discovered === null) {
-      state.error = 'no Jira MCP tool found'
-      state.toolNames = tools.filter((tool) => tool.mcp).map((tool) => tool.name)
-      return
+      return { result: null, error: 'no Jira MCP tool found', toolNames: tools.filter((tool) => tool.mcp).map((tool) => tool.name), lastCall: null }
     }
-    config = discovered
+    resolved = discovered
   }
 
   let lastResult: McpToolResult | null = null
+  let lastCall = ''
   for (const argName of ARG_NAMES) {
+    // Set right before each call, so a reject inside the try carries the name of the call that
+    // threw, the same name an exhausted loop carries for its last attempt.
+    lastCall = `${resolved.tool} on ${resolved.server} with ${argName}`
     let result: McpToolResult
     try {
-      result = await host.mcpCall(config.server, config.tool, { [argName]: key })
+      result = await host.mcpCall(resolved.server, resolved.tool, { [argName]: key })
     } catch (error) {
-      state.error = messageOf(error)
-      return
+      return { result: null, error: messageOf(error), toolNames: [], lastCall }
     }
-    if (!result.isError) {
-      state.result = result
-      return
-    }
+    if (!result.isError) return { result, error: null, toolNames: [], lastCall: null }
     lastResult = result
   }
 
   // Every argument name failed: the real Jira MCP tool this session has may need an argument
-  // this file does not know to send, so its own error text (not reworded) is the only clue.
-  if (lastResult !== null) state.error = lastResult.content.map((block) => block.text ?? '').join('\n\n')
+  // this file does not know to send, so its answer's own text is the clue kept. A block can
+  // carry no text; a wholly blank answer falls back to a line naming the server and tool, so the
+  // error line always carries words for a person to read.
+  const texts = (lastResult?.content ?? []).map((block) => block.text).filter((text): text is string => typeof text === 'string' && text !== '')
+  const error = texts.length > 0 ? texts.join('\n\n') : `the tool answered isError with no text (server ${resolved.server}, tool ${resolved.tool})`
+  return { result: null, error, toolNames: [], lastCall }
 }
 
 // The real element types, so the typecheck refuses a prop the engine would refuse. `Text` takes
-// no `key` (giving it one drops the whole tree); `Box` and `Button` do.
+// no `key` (giving it one drops the whole tree); `Box` and `Button` do. None of this pane's
+// Buttons take a `hotkey`: pull-request-pane tested that prop in a real terminal, and the
+// hotkey did not fire inside a pane.
 type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
 
 function refreshRowOf(ui: Ui, state: State): RenderElement | null {
@@ -281,6 +300,7 @@ function errorRowsOf(ui: Ui, state: State): RenderElement[] {
   if (state.error === null) return []
   const { Text } = ui
   const rows: RenderElement[] = [Text({ color: 'red', children: state.error })]
+  if (state.lastCall !== null) rows.push(Text({ dimColor: true, children: `called ${state.lastCall}` }))
   if (state.toolNames.length > 0) {
     rows.push(Text({ dimColor: true, children: 'connected MCP tools:' }))
     for (const name of state.toolNames) rows.push(Text({ dimColor: true, children: name }))
@@ -368,9 +388,11 @@ function paneOf(ui: Ui, state: State, host: Host): RenderElement {
   return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: 1, children })
 }
 
-// `config server=<s> tool=<t>` pins the MCP tool so `fetchIssue` never calls `tool.list`;
-// `config clear` drops that pin, back to discovery. Values carry no whitespace, so a plain
-// `\S+` token match is enough.
+// `config server=<s> tool=<t>` pins the MCP tool, so `fetchIssue` skips `tool.list` and calls it
+// directly; `config clear` drops that pin, back to discovery. Values carry no whitespace, so a
+// plain `\S+` token match is enough. Both branches call `storeSet` unawaited: `state.config`
+// already holds the value the rest of this session reads, so a slow or failing write to the
+// store must not hold up the command's reply.
 function handleConfig(state: State, host: Host, rest: string): { text: string } {
   if (rest === 'clear') {
     state.config = null
@@ -406,11 +428,13 @@ export function register(on: On) {
     result: null,
     error: null,
     toolNames: [],
+    lastCall: null,
     config: null,
     isLoading: false,
     fetchedAt: null,
     isStructuredOpen: false,
     armed: null,
+    fetchSeq: 0,
   }
 
   // A second `prompt.submit` arriving while the first one's `next` is still in flight must not
@@ -459,6 +483,8 @@ export function register(on: On) {
       return { text: `jira-ticket-pane shows ${args}` }
     }
 
+    // A typo should spend nothing on the real MCP server: this branch calls `host.status` alone,
+    // zero calls to `mcp.call`, `tool.list` or `fs.read`.
     const usage = `jira-ticket-pane: "${args}" is not an issue key (expected a form such as DEMO-1)`
     host.status(usage)
     return { text: usage }
@@ -477,10 +503,10 @@ export function register(on: On) {
     return result
   })
 
-  // The armed issue rides the next prompt as context, never the prompt box itself. Fit the text
-  // to the room the context has left, attach it on the way down, and disarm only once the
-  // prompt actually entered (a drop leaves it armed, so a refused prompt does not silently
-  // spend the one attach the person meant to make).
+  // The armed issue rides the next prompt as one of its context entries; the person's own prompt
+  // text passes through unchanged. Fit the text to the room the context has left, attach it on
+  // the way down, and disarm only once the prompt actually entered (a drop leaves it armed, so a
+  // refused prompt keeps the one attach the person meant to make, to spend on a later try).
   on('prompt.submit', async ($, e, next) => {
     const host = state.host
     const asked = state.armed
