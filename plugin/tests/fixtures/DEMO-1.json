@@ -1,0 +1,15 @@
+{
+  "content": [
+    { "type": "text", "text": "DEMO-1: Sample ticket for local development" },
+    { "type": "text", "text": "設定画面から通知を止められるようにする。\n\n受け入れ条件:\n- 設定に通知のオンオフを追加する\n- 既定はオンのままにする" }
+  ],
+  "isError": false,
+  "structuredContent": {
+    "key": "DEMO-1",
+    "fields": {
+      "summary": "Sample ticket for local development",
+      "status": { "name": "In Progress" },
+      "assignee": { "displayName": "Demo User" }
+    }
+  }
+}
