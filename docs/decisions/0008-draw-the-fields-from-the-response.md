@@ -35,7 +35,7 @@ prompt draws the same heading and description.
 
 A response with no issue object in any content block falls back to
 `0004`'s block drawing, with the raw JSON fold below it. In the parsed
-view the same fold sits under the `[meta]` tab. The fold shows
+view the same fold sits under the `meta` tab. The fold shows
 `structuredContent` when the tool sends one, else the parsed block.
 
 ## Consequences

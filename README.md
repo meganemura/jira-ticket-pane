@@ -43,13 +43,21 @@ To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
 - `/jira <KEY>` fetches the issue and draws it in the pane. It opens the
   pane if the pane is closed.
 - `/jira` with no key toggles the pane's display.
-- The `↻` button refetches the current issue. The plugin polls nothing on a
-  timer.
-- The `[issue]` tab shows the summary and the description.
-- The `[meta]` tab shows the fields and, under a fold, the raw JSON.
-- The `attach to next prompt` button arms the issue text. Press it again to
-  drop the text. The text drops on its own once a prompt goes out. The
-  plugin does not write into the prompt box.
+- A top bar sits above the issue: the `issue` and `meta` tabs on the
+  left, the `↻` and `attach` buttons on the right. The tab not open
+  draws dim.
+- The `↻ <HH:MM>` button refetches the current issue and shows the time
+  of the last fetch. The plugin polls nothing on a timer.
+- The header, above both tabs, shows the key, the summary, the status,
+  the type, the priority, and the assignee. The status dot takes its
+  color from the issue's status category.
+- The `issue` tab shows the description.
+- The `meta` tab shows the fields and, under the `raw json` fold, the
+  raw JSON.
+- The `attach` button arms the issue text; its label then reads
+  `attached ✓`. Press it again to drop the text. The text drops on its
+  own once a prompt goes out. The plugin does not write into the prompt
+  box.
 - `prompt.submit`'s `context` field holds up to 32,000 characters in
   total, across every block already on the prompt. The plugin fits the
   armed issue text to the room left in that budget.
@@ -127,6 +135,6 @@ appears only in `~/.claude/debug/<session>.txt`.
 - It does not manage authentication. When the MCP server returns an error,
   the pane shows the server's error text as is.
 - The plugin has run against Atlassian's own MCP server. When the
-  response matches that server's shape, the `[issue]` tab draws the
-  summary and the description, and the `[meta]` tab draws the other
+  response matches that server's shape, the `issue` tab draws the
+  summary and the description, and the `meta` tab draws the other
   fields. A response in another shape draws as its raw content blocks.
