@@ -4,10 +4,10 @@
 // ride the person's next prompt as context, the same way the model reads any other attached text.
 //
 // Must NOT know about: which MCP server serves Jira (learned from `$.tool.list()`, or pinned
-// once with `/jira config`); writing back to Jira; a poll timer (an issue does not change
-// minute to minute, so one refresh press stays enough); drag-select over the issue text (a
-// later milestone); field-by-field rendering of `structuredContent` (shown as raw JSON behind a
-// fold, collapsed until pressed open).
+// once with `/jira config`); which Atlassian cloud site holds the issue (resolved through
+// `getAccessibleAtlassianResources`, or pinned with `/jira config cloud=<id>`); writing back to
+// Jira; a poll timer (an issue does not change minute to minute, so one refresh press stays
+// enough); drag-select over the issue text (a later milestone).
 //
 // It loads only where Claude Code has function hooks enabled. The engine's validator reads this
 // file statically, so every call on `$` is spelled `$.noun.event(...)` and `$` is handed only to
@@ -23,9 +23,14 @@ const COMMAND = 'jira'
 const KEY_RE = /^[A-Z][A-Z0-9]+-\d+$/
 
 // Jira MCP tools spell the issue key argument differently server to server; tried in order
-// until one answers `isError: false`. This order is a guess: no real Atlassian MCP server's
-// argument name has been confirmed against this file yet.
-const ARG_NAMES = ['issueKey', 'issueIdOrKey', 'key']
+// until one answers `isError: false`. Atlassian's own MCP server confirmed `issueIdOrKey`; the
+// other two stay as a fallback for a server that spells the argument another way.
+const ARG_NAMES = ['issueIdOrKey', 'issueKey', 'key']
+
+// Matches the tool that lists the Atlassian cloud sites a session can reach, by name alone
+// (Atlassian's own server calls it `getAccessibleAtlassianResources`). Its result names the
+// `cloudId` a Jira issue call needs.
+const ACCESSIBLE_RESOURCES_RE = /accessible.*resources/i
 
 // `PROMPT_CONTEXT_MAX_CHARS` copies the cap the d.ts states for `prompt.submit`'s `context`, so
 // `fittedContextTextOf` can size an attachment up front, without spending a prompt just to learn
@@ -35,7 +40,7 @@ const CONTEXT_CUT_NOTE = '(The rest of this issue was cut: it did not fit in the
 
 const STORE_KEY = 'config'
 
-type McpConfig = { server: string; tool: string }
+type McpConfig = { server: string; tool: string; cloudId?: string }
 
 type Armed = { key: string; text: string }
 
@@ -68,6 +73,11 @@ type State = {
   isStructuredOpen: boolean
   armed: Armed | null
   fetchSeq: number
+  // The Atlassian cloud site id, resolved once per session through
+  // `getAccessibleAtlassianResources` and kept here for every later fetch; never written to the
+  // store, since a pin belongs to `/jira config cloud=<id>` alone.
+  cloudId: string | null
+  siteLines: string[]
 }
 
 // The host is a bundle of closures over `$`, built once at `session.start`: `$` stays inside
@@ -102,7 +112,8 @@ function configFromStore(value: unknown): McpConfig | null {
   const server = Reflect.get(value, 'server')
   const tool = Reflect.get(value, 'tool')
   if (typeof server !== 'string' || typeof tool !== 'string') return null
-  return { server, tool }
+  const cloudId = Reflect.get(value, 'cloudId')
+  return { server, tool, ...(typeof cloudId === 'string' ? { cloudId } : {}) }
 }
 
 // A person writes a fixture file, so its shape is unchecked until here: the two fields
@@ -147,9 +158,152 @@ export function discoverTool(tools: ToolInfo[]): McpConfig | null {
   return candidates[0]!.parsed
 }
 
-// The text a fetched issue reads as once it rides a prompt or is shown to the person: every
-// `text` content block, in order, each block its own paragraph.
+// The tool that lists a session's accessible Atlassian cloud sites, on the same server as the
+// Jira issue tool: connected, name matching `ACCESSIBLE_RESOURCES_RE`, server cut from its full
+// name matching `server`. Absent from `tool.list()`, some servers need no `cloudId` at all.
+function accessibleResourcesToolOf(tools: ToolInfo[], server: string): McpConfig | null {
+  const match = tools.find((tool) => tool.mcp && ACCESSIBLE_RESOURCES_RE.test(tool.name) && parsedToolNameOf(tool.name)?.server === server)
+  return match === undefined ? null : parsedToolNameOf(match.name)
+}
+
+// One Jira issue, read off the shape Atlassian's own MCP server answers with: every field a
+// plain string, always, with `''` standing in for an absent or a `null` field, so a caller
+// never needs its own null check on top of this one.
+type IssueView = {
+  key: string
+  summary: string
+  type: string
+  status: string
+  priority: string
+  assignee: string
+  reporter: string
+  labels: string[]
+  description: string
+  url: string
+  created: string
+  updated: string
+}
+
+function stringOf(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+// A Jira field carried as `{ name: string }` (issue type, status, priority) or `null`.
+function nameOf(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return ''
+  return stringOf(Reflect.get(value, 'name'))
+}
+
+// A Jira field carried as `{ displayName: string }` (assignee, reporter) or `null`.
+function displayNameOf(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return ''
+  return stringOf(Reflect.get(value, 'displayName'))
+}
+
+// Reads plain text out of an Atlassian Document Format node. A `text` node gives its own text;
+// `paragraph` and `heading` join their children then end with a newline; a `bulletList` or
+// `orderedList` gives one `- `-led line per `listItem`; `codeBlock` joins its children's text;
+// `hardBreak` is a bare newline. Every other node, `doc` included, recurses into its children.
+// A plain string passes through unchanged; `null` or `undefined` reads as `''`.
+export function adfTextOf(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (node === null || node === undefined) return ''
+  if (typeof node !== 'object') return ''
+  const type = Reflect.get(node, 'type')
+  const contentRaw = Reflect.get(node, 'content')
+  const children = Array.isArray(contentRaw) ? contentRaw : []
+
+  if (type === 'text') return stringOf(Reflect.get(node, 'text'))
+  if (type === 'hardBreak') return '\n'
+  // Every block-level node ends with its own newline, so a doc's children join with no
+  // separator of their own and still land one block per line.
+  if (type === 'paragraph' || type === 'heading') return `${children.map(adfTextOf).join('')}\n`
+  if (type === 'codeBlock') return `${children.map(adfTextOf).join('')}\n`
+  if (type === 'bulletList' || type === 'orderedList') {
+    const lines = children
+      .filter((item): item is object => typeof item === 'object' && item !== null && Reflect.get(item, 'type') === 'listItem')
+      .map((item) => {
+        const itemContent = Reflect.get(item, 'content')
+        const itemChildren = Array.isArray(itemContent) ? itemContent : []
+        return `- ${itemChildren.map(adfTextOf).join('').trimEnd()}`
+      })
+    return `${lines.join('\n')}\n`
+  }
+  return children.map(adfTextOf).join('')
+}
+
+// The first text content block that parses as JSON shaped like Atlassian's own MCP server
+// answers with, `{ issues: { nodes: [...] } }`, `null` when no block parses that way (an older
+// or a different server's plain-text answer, for instance).
+function issueJsonOf(result: McpToolResult): unknown | null {
+  for (const block of result.content) {
+    if (block.type !== 'text' || typeof block.text !== 'string') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(block.text)
+    } catch {
+      continue
+    }
+    if (typeof parsed !== 'object' || parsed === null) continue
+    const issues = Reflect.get(parsed, 'issues')
+    if (typeof issues !== 'object' || issues === null) continue
+    const nodes = Reflect.get(issues, 'nodes')
+    if (!Array.isArray(nodes) || nodes.length === 0) continue
+    return parsed
+  }
+  return null
+}
+
+// `issueJsonOf`'s `{ issues: { nodes: [...] } }`, read into an `IssueView`; `null` when no
+// content block carries that shape, so the caller falls back to drawing the raw blocks.
+export function issueViewOf(result: McpToolResult): IssueView | null {
+  const parsed = issueJsonOf(result)
+  if (parsed === null) return null
+  const nodes = Reflect.get(Reflect.get(parsed as object, 'issues') as object, 'nodes') as unknown[]
+  const node = nodes[0]
+  if (typeof node !== 'object' || node === null) return null
+  const fieldsRaw = Reflect.get(node, 'fields')
+  const fields = typeof fieldsRaw === 'object' && fieldsRaw !== null ? fieldsRaw : {}
+  const labelsRaw = Reflect.get(fields, 'labels')
+  const labels = Array.isArray(labelsRaw) ? labelsRaw.filter((label): label is string => typeof label === 'string') : []
+  return {
+    key: stringOf(Reflect.get(node, 'key')),
+    summary: stringOf(Reflect.get(fields, 'summary')),
+    type: nameOf(Reflect.get(fields, 'issuetype')),
+    status: nameOf(Reflect.get(fields, 'status')),
+    priority: nameOf(Reflect.get(fields, 'priority')),
+    assignee: displayNameOf(Reflect.get(fields, 'assignee')),
+    reporter: displayNameOf(Reflect.get(fields, 'reporter')),
+    labels,
+    // Trimmed: every block-level node in adfTextOf ends its own line with a newline, so the
+    // last block of a description leaves one trailing behind with nothing after it.
+    description: adfTextOf(Reflect.get(fields, 'description')).trimEnd(),
+    url: stringOf(Reflect.get(node, 'webUrl')),
+    created: stringOf(Reflect.get(fields, 'created')),
+    updated: stringOf(Reflect.get(fields, 'updated')),
+  }
+}
+
+// The `type · status · priority · assignee` line: an empty type, status or priority drops out;
+// assignee always shows, `unassigned` standing in for an empty one.
+function metaLineOf(view: IssueView): string {
+  const parts = [view.type, view.status, view.priority].filter((part) => part !== '')
+  parts.push(view.assignee !== '' ? view.assignee : 'unassigned')
+  return parts.join(' · ')
+}
+
+// The text a fetched issue reads as once it rides a prompt or is shown to the person. A parsed
+// `IssueView` reads as a heading block (key, summary, the meta line, labels when any, the url),
+// a blank line, then the description. Otherwise every `text` content block joins as its own
+// paragraph, unchanged from before field-by-field rendering existed.
 export function issueTextOf(result: McpToolResult): string {
+  const view = issueViewOf(result)
+  if (view !== null) {
+    const heading = [`${view.key}: ${view.summary}`, metaLineOf(view)]
+    if (view.labels.length > 0) heading.push(`labels: ${view.labels.join(', ')}`)
+    heading.push(view.url)
+    return [heading.join('\n'), view.description].join('\n\n')
+  }
   return result.content
     .filter((block) => block.type === 'text')
     .map((block) => (typeof block.text === 'string' ? block.text : ''))
@@ -183,20 +337,24 @@ export function fittedContextTextOf(text: string, room: number): string | undefi
 }
 
 // What a fetch found, kept out of `state` until the caller knows this is still the fetch that
-// gets to write it (a `fetchIssue` for an older key can land after a newer one).
+// gets to write it (a `fetchIssue` for an older key can land after a newer one). `cloudId` is
+// the value to keep in `state.cloudId` once this fetch lands: unchanged from what came in, when
+// this fetch never touched it.
 type FetchOutcome = {
   result: McpToolResult | null
   error: string | null
   toolNames: string[]
   lastCall: string | null
+  cloudId: string | null
+  siteLines: string[]
 }
 
 // Fetches `key` into `state`, from a fixture file when `JIRA_TICKET_PANE_FIXTURE` names a
 // directory, else from the connected MCP server. Refresh, or a fast run of `/jira <KEY>`, can
 // start a second fetch before the first one lands. `fetchSeq` numbers each attempt; `fetchIssue`
 // compares its own number to the one currently in `state` before it writes `result`, `error`,
-// `toolNames`, `lastCall`, `isLoading` or `fetchedAt`, so a late answer from an older fetch
-// leaves standing whatever a newer fetch already wrote.
+// `toolNames`, `lastCall`, `cloudId`, `siteLines`, `isLoading` or `fetchedAt`, so a late answer
+// from an older fetch leaves standing whatever a newer fetch already wrote.
 async function fetchIssue(state: State, key: string): Promise<void> {
   const host = state.host
   if (host === null) return
@@ -206,15 +364,19 @@ async function fetchIssue(state: State, key: string): Promise<void> {
   state.error = null
   state.toolNames = []
   state.lastCall = null
+  state.siteLines = []
   host.invalidate()
   try {
     const dir = await host.envFixture()
-    const outcome = dir !== undefined && dir !== '' ? await fetchFromFixture(host, dir, key) : await fetchFromMcp(host, state.config, key)
+    const outcome =
+      dir !== undefined && dir !== '' ? await fetchFromFixture(host, dir, key, state.cloudId) : await fetchFromMcp(host, state.config, state.cloudId, key)
     if (seq === state.fetchSeq) {
       state.result = outcome.result
       state.error = outcome.error
       state.toolNames = outcome.toolNames
       state.lastCall = outcome.lastCall
+      state.cloudId = outcome.cloudId
+      state.siteLines = outcome.siteLines
     }
   } finally {
     if (seq === state.fetchSeq) {
@@ -226,35 +388,116 @@ async function fetchIssue(state: State, key: string): Promise<void> {
 }
 
 // Fixture mode never calls `mcp.call` or `tool.list`: a fixture stands in for both the
-// discovery and the call, for local development with no MCP server connected.
-async function fetchFromFixture(host: Host, dir: string, key: string): Promise<FetchOutcome> {
+// discovery and the call, for local development with no MCP server connected. It never touches
+// `cloudId` either; `priorCloudId` passes through unchanged.
+async function fetchFromFixture(host: Host, dir: string, key: string, priorCloudId: string | null): Promise<FetchOutcome> {
   const path = `${dir}/${key}.json`
   let text: string
   try {
     text = await host.fsRead(path)
   } catch (error) {
-    return { result: null, error: `jira-ticket-pane: could not read ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null }
+    return { result: null, error: `jira-ticket-pane: could not read ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null, cloudId: priorCloudId, siteLines: [] }
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch (error) {
-    return { result: null, error: `jira-ticket-pane: could not parse ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null }
+    return { result: null, error: `jira-ticket-pane: could not parse ${path}: ${messageOf(error)}`, toolNames: [], lastCall: null, cloudId: priorCloudId, siteLines: [] }
   }
   const result = mcpResultOf(parsed)
-  if (result === null) return { result: null, error: `jira-ticket-pane: ${path} is not a Jira MCP tool result`, toolNames: [], lastCall: null }
-  return { result, error: null, toolNames: [], lastCall: null }
+  if (result === null) {
+    return { result: null, error: `jira-ticket-pane: ${path} is not a Jira MCP tool result`, toolNames: [], lastCall: null, cloudId: priorCloudId, siteLines: [] }
+  }
+  return { result, error: null, toolNames: [], lastCall: null, cloudId: priorCloudId, siteLines: [] }
 }
 
-async function fetchFromMcp(host: Host, config: McpConfig | null, key: string): Promise<FetchOutcome> {
+// One Atlassian cloud site, out of `getAccessibleAtlassianResources`'s own answer.
+type Site = { id: string; url: string }
+
+// Reads the array `getAccessibleAtlassianResources` answers with, `[{ id, url, name, ... }]`,
+// into the `id` and `url` of each entry; an entry with no string `id` is dropped.
+function sitesOf(value: unknown): Site[] {
+  if (!Array.isArray(value)) return []
+  const sites: Site[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const id = Reflect.get(entry, 'id')
+    if (typeof id !== 'string') continue
+    const url = Reflect.get(entry, 'url')
+    sites.push({ id, url: typeof url === 'string' ? url : '' })
+  }
+  return sites
+}
+
+// What resolving the cloud site found: `cloudId` set on exactly one accessible site, `error` (and
+// `siteLines` naming each candidate) on zero or on more than one.
+type SiteResolution = { cloudId: string | null; error: string | null; siteLines: string[]; lastCall: string | null }
+
+async function siteResolutionOf(host: Host, server: string, tool: string): Promise<SiteResolution> {
+  const lastCall = `${tool} on ${server}`
+  let result: McpToolResult
+  try {
+    result = await host.mcpCall(server, tool, {})
+  } catch (error) {
+    return { cloudId: null, error: messageOf(error), siteLines: [], lastCall }
+  }
+  if (result.isError) {
+    const texts = result.content.map((block) => block.text).filter((text): text is string => typeof text === 'string' && text !== '')
+    const error = texts.length > 0 ? texts.join('\n\n') : `${tool} answered isError with no text (server ${server})`
+    return { cloudId: null, error, siteLines: [], lastCall }
+  }
+  const text = result.content.find((block) => block.type === 'text' && typeof block.text === 'string')?.text
+  let parsed: unknown
+  try {
+    parsed = text === undefined ? [] : JSON.parse(text)
+  } catch (error) {
+    return { cloudId: null, error: `jira-ticket-pane: could not parse ${tool}'s answer: ${messageOf(error)}`, siteLines: [], lastCall }
+  }
+  const sites = sitesOf(parsed)
+  if (sites.length === 0) return { cloudId: null, error: 'no Atlassian site is accessible to this session', siteLines: [], lastCall }
+  if (sites.length > 1) {
+    return {
+      cloudId: null,
+      error: 'more than one Atlassian site; pin one with /jira config server=<s> tool=<t> cloud=<id>',
+      siteLines: sites.map((site) => `${site.id}  ${site.url}`.trimEnd()),
+      lastCall,
+    }
+  }
+  return { cloudId: sites[0]!.id, error: null, siteLines: [], lastCall: null }
+}
+
+async function fetchFromMcp(host: Host, config: McpConfig | null, priorCloudId: string | null, key: string): Promise<FetchOutcome> {
   let resolved = config
+  // `tools` stays `null` when `config` pins the server and tool by hand: that path never calls
+  // `tool.list`, so it has nothing to check `ACCESSIBLE_RESOURCES_RE` against and sends no
+  // `cloudId` unless `config.cloudId` or an already-resolved `priorCloudId` gives it one.
+  let tools: ToolInfo[] | null = null
   if (resolved === null) {
-    const tools = await host.toolList()
+    tools = await host.toolList()
     const discovered = discoverTool(tools)
     if (discovered === null) {
-      return { result: null, error: 'no Jira MCP tool found', toolNames: tools.filter((tool) => tool.mcp).map((tool) => tool.name), lastCall: null }
+      return {
+        result: null,
+        error: 'no Jira MCP tool found',
+        toolNames: tools.filter((tool) => tool.mcp).map((tool) => tool.name),
+        lastCall: null,
+        cloudId: priorCloudId,
+        siteLines: [],
+      }
     }
     resolved = discovered
+  }
+
+  let cloudId = config?.cloudId ?? priorCloudId ?? null
+  if (cloudId === null && tools !== null) {
+    const accessibleTool = accessibleResourcesToolOf(tools, resolved.server)
+    if (accessibleTool !== null) {
+      const site = await siteResolutionOf(host, accessibleTool.server, accessibleTool.tool)
+      if (site.error !== null) {
+        return { result: null, error: site.error, toolNames: [], lastCall: site.lastCall, cloudId: null, siteLines: site.siteLines }
+      }
+      cloudId = site.cloudId
+    }
   }
 
   let lastResult: McpToolResult | null = null
@@ -262,14 +505,18 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, key: string): 
   for (const argName of ARG_NAMES) {
     // Set right before each call, so a reject inside the try carries the name of the call that
     // threw, the same name an exhausted loop carries for its last attempt.
-    lastCall = `${resolved.tool} on ${resolved.server} with ${argName}`
+    lastCall = `${resolved.tool} on ${resolved.server} with ${argName} (${cloudId !== null ? 'cloudId set' : 'no cloudId'})`
     let result: McpToolResult
     try {
-      result = await host.mcpCall(resolved.server, resolved.tool, { [argName]: key })
+      result = await host.mcpCall(resolved.server, resolved.tool, {
+        [argName]: key,
+        ...(cloudId !== null ? { cloudId } : {}),
+        responseContentFormat: 'markdown',
+      })
     } catch (error) {
-      return { result: null, error: messageOf(error), toolNames: [], lastCall }
+      return { result: null, error: messageOf(error), toolNames: [], lastCall, cloudId, siteLines: [] }
     }
-    if (!result.isError) return { result, error: null, toolNames: [], lastCall: null }
+    if (!result.isError) return { result, error: null, toolNames: [], lastCall: null, cloudId, siteLines: [] }
     lastResult = result
   }
 
@@ -279,7 +526,7 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, key: string): 
   // error line always carries words for a person to read.
   const texts = (lastResult?.content ?? []).map((block) => block.text).filter((text): text is string => typeof text === 'string' && text !== '')
   const error = texts.length > 0 ? texts.join('\n\n') : `the tool answered isError with no text (server ${resolved.server}, tool ${resolved.tool})`
-  return { result: null, error, toolNames: [], lastCall }
+  return { result: null, error, toolNames: [], lastCall, cloudId, siteLines: [] }
 }
 
 // The real element types, so the typecheck refuses a prop the engine would refuse. `Text` takes
@@ -306,13 +553,28 @@ function errorRowsOf(ui: Ui, state: State): RenderElement[] {
     for (const name of state.toolNames) rows.push(Text({ dimColor: true, children: name }))
     rows.push(Text({ dimColor: true, children: 'fix the tool with: /jira config server=<name> tool=<name>' }))
   }
+  for (const line of state.siteLines) rows.push(Text({ dimColor: true, children: line }))
   return rows
 }
 
+// A parsed `IssueView` draws as a bold heading, the meta line, labels when any, the description
+// (or `(no description)`), then the url. Otherwise every `text` content block draws as its own
+// row, unchanged from before field-by-field rendering existed.
 function resultRowsOf(ui: Ui, state: State): RenderElement[] {
   const result = state.result
   if (result === null) return []
   const { Box, Text } = ui
+  const view = issueViewOf(result)
+  if (view !== null) {
+    const rows: RenderElement[] = [
+      Text({ bold: true, children: `${view.key} ${view.summary}` }),
+      Text({ dimColor: true, children: metaLineOf(view) }),
+    ]
+    if (view.labels.length > 0) rows.push(Text({ dimColor: true, children: `labels: ${view.labels.join(', ')}` }))
+    rows.push(view.description !== '' ? Text({ children: view.description }) : Text({ dimColor: true, children: '(no description)' }))
+    rows.push(Text({ dimColor: true, children: view.url }))
+    return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: rows })]
+  }
   const blocks = result.content.map((block) => (block.type === 'text' ? Text({ children: block.text ?? '' }) : Text({ dimColor: true, children: `[${block.type} block]` })))
   return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: blocks })]
 }
@@ -345,9 +607,18 @@ function armRowOf(ui: Ui, state: State, host: Host): RenderElement | null {
   })
 }
 
+// The fold's raw JSON: `structuredContent` when the tool sent one, else the text block
+// `issueViewOf` itself read its fields from. This keeps the fold showing something once fields
+// can draw straight from a text block instead of needing `structuredContent`.
+function structuredJsonOf(result: McpToolResult): unknown {
+  return result.structuredContent !== undefined ? result.structuredContent : issueJsonOf(result)
+}
+
 function structuredRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
   const result = state.result
-  if (result === null || result.structuredContent === undefined) return []
+  if (result === null) return []
+  const structured = structuredJsonOf(result)
+  if (structured === null || structured === undefined) return []
   const { Box, Button, Text } = ui
   const isOpen = state.isStructuredOpen
   const rows: RenderElement[] = [
@@ -365,7 +636,7 @@ function structuredRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
       ],
     }),
   ]
-  if (isOpen) rows.push(Text({ dimColor: true, children: JSON.stringify(result.structuredContent, null, 2) }))
+  if (isOpen) rows.push(Text({ dimColor: true, children: JSON.stringify(structured, null, 2) }))
   return rows
 }
 
@@ -389,10 +660,11 @@ function paneOf(ui: Ui, state: State, host: Host): RenderElement {
 }
 
 // `config server=<s> tool=<t>` pins the MCP tool, so `fetchIssue` skips `tool.list` and calls it
-// directly; `config clear` drops that pin, back to discovery. Values carry no whitespace, so a
-// plain `\S+` token match is enough. Both branches call `storeSet` unawaited: `state.config`
-// already holds the value the rest of this session reads, so a slow or failing write to the
-// store must not hold up the command's reply.
+// directly; `config clear` drops that pin, back to discovery. `cloud=<id>` is optional and pins
+// the Atlassian cloud site, so `fetchFromMcp` skips `getAccessibleAtlassianResources` too. Values
+// carry no whitespace, so a plain `\S+` token match is enough. Both branches call `storeSet`
+// unawaited: `state.config` already holds the value the rest of this session reads, so a slow or
+// failing write to the store must not hold up the command's reply.
 function handleConfig(state: State, host: Host, rest: string): { text: string } {
   if (rest === 'clear') {
     state.config = null
@@ -402,21 +674,25 @@ function handleConfig(state: State, host: Host, rest: string): { text: string } 
 
   let server: string | undefined
   let tool: string | undefined
+  let cloud: string | undefined
   for (const token of rest.split(/\s+/).filter((piece) => piece !== '')) {
     const serverMatch = /^server=(\S+)$/.exec(token)
     if (serverMatch) server = serverMatch[1]
     const toolMatch = /^tool=(\S+)$/.exec(token)
     if (toolMatch) tool = toolMatch[1]
+    const cloudMatch = /^cloud=(\S+)$/.exec(token)
+    if (cloudMatch) cloud = cloudMatch[1]
   }
 
   if (server === undefined || tool === undefined) {
-    const usage = 'jira-ticket-pane: usage: /jira config server=<name> tool=<name> (or /jira config clear)'
+    const usage = 'jira-ticket-pane: usage: /jira config server=<name> tool=<name> [cloud=<id>] (or /jira config clear)'
     host.status(usage)
     return { text: usage }
   }
 
-  state.config = { server, tool }
-  void host.storeSet(STORE_KEY, { server, tool }).catch(() => undefined)
+  const config: McpConfig = { server, tool, ...(cloud !== undefined ? { cloudId: cloud } : {}) }
+  state.config = config
+  void host.storeSet(STORE_KEY, config).catch(() => undefined)
   return { text: `jira-ticket-pane calls ${tool} on ${server}` }
 }
 
@@ -435,6 +711,8 @@ export function register(on: On) {
     isStructuredOpen: false,
     armed: null,
     fetchSeq: 0,
+    cloudId: null,
+    siteLines: [],
   }
 
   // A second `prompt.submit` arriving while the first one's `next` is still in flight must not

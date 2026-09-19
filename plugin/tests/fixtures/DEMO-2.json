@@ -1,0 +1,13 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "DEMO-2: Sample ticket without structured fields"
+    },
+    {
+      "type": "text",
+      "text": "Plain text description with no JSON payload."
+    }
+  ],
+  "isError": false
+}

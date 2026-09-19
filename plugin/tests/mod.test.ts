@@ -7,7 +7,7 @@
 import type { CommandRunInput, McpToolResult, On, RenderInput, ToolInfo } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 
-import { contextTextOf, discoverTool, fittedContextTextOf, issueTextOf } from '../hooks/mod'
+import { adfTextOf, contextTextOf, discoverTool, fittedContextTextOf, issueTextOf, issueViewOf } from '../hooks/mod'
 
 tier('user')
 
@@ -29,6 +29,13 @@ const RUN: CommandRunInput = { command: COMMAND, args: '', origin: { kind: 'comp
 
 const TOOLS: ToolInfo[] = [{ name: 'mcp__atlassian__getJiraIssue', description: 'Get a Jira issue', mcp: true }]
 
+// A session with a site-resolving tool alongside the issue tool, both on the same server: the
+// shape `accessibleResourcesToolOf` looks for.
+const TOOLS_WITH_RESOURCES: ToolInfo[] = [
+  { name: 'mcp__atlassian__getJiraIssue', description: 'Get a Jira issue', mcp: true },
+  { name: 'mcp__atlassian__getAccessibleAtlassianResources', description: 'List accessible Atlassian sites', mcp: true },
+]
+
 const SUCCESS_RESULT: McpToolResult = {
   content: [{ type: 'text', text: 'DEMO-1: Sample summary' }, { type: 'text', text: 'A short description.' }],
   isError: false,
@@ -38,6 +45,47 @@ const STRUCTURED_RESULT: McpToolResult = {
   ...SUCCESS_RESULT,
   structuredContent: { key: 'DEMO-1', fields: { summary: 'Sample summary' } },
 }
+
+// One Jira issue in the shape Atlassian's own MCP server answers with: a single text content
+// block holding a JSON string of `{ issues: { nodes: [...] } }`.
+const DEMO1_ISSUE = {
+  issues: {
+    nodes: [
+      {
+        key: 'DEMO-1',
+        fields: {
+          summary: 'Add a setting to turn off notifications',
+          issuetype: { name: 'Story' },
+          status: { name: 'In Progress' },
+          priority: { name: 'Medium' },
+          assignee: { displayName: 'Demo User' },
+          reporter: { displayName: 'Demo Reporter' },
+          labels: ['notifications', 'settings'],
+          description: {
+            type: 'doc',
+            version: 1,
+            content: [
+              { type: 'paragraph', content: [{ type: 'text', text: 'Add a toggle to the settings screen that turns notifications off.' }] },
+              { type: 'paragraph', content: [{ type: 'text', text: '設定画面から通知を止められるようにする。' }] },
+              {
+                type: 'bulletList',
+                content: [
+                  { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Add an on/off switch to settings' }] }] },
+                  { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: '既定はオンのままにする' }] }] },
+                ],
+              },
+            ],
+          },
+          created: '2026-01-05T09:00:00.000Z',
+          updated: '2026-01-06T10:30:00.000Z',
+        },
+        webUrl: 'https://example.atlassian.net/browse/DEMO-1',
+      },
+    ],
+  },
+}
+
+const DEMO1_RESULT: McpToolResult = { content: [{ type: 'text', text: JSON.stringify(DEMO1_ISSUE) }], isError: false }
 
 type McpCall = { server: string; tool: string; args: Record<string, unknown> }
 
@@ -155,7 +203,7 @@ describe('mod', () => {
 
     expect(text).toBe('jira-ticket-pane shows DEMO-1')
     expect(kept.opened).toEqual([PANE_ID])
-    expect(kept.mcpCalls).toEqual([{ server: 'atlassian', tool: 'getJiraIssue', args: { issueKey: 'DEMO-1' } }])
+    expect(kept.mcpCalls).toEqual([{ server: 'atlassian', tool: 'getJiraIssue', args: { issueIdOrKey: 'DEMO-1', responseContentFormat: 'markdown' } }])
     expect(textOf(await $.ui.render(PANE))).toContain('DEMO-1: Sample summary')
   })
 
@@ -163,15 +211,15 @@ describe('mod', () => {
     const kept = world(on, {
       tools: TOOLS,
       mcp: ({ args }) => {
-        if ('issueKey' in args) return { content: [{ type: 'text', text: 'issueKey rejected' }], isError: true }
-        return { content: [{ type: 'text', text: 'DEMO-1 via issueIdOrKey' }], isError: false }
+        if ('issueIdOrKey' in args) return { content: [{ type: 'text', text: 'issueIdOrKey rejected' }], isError: true }
+        return { content: [{ type: 'text', text: 'DEMO-1 via issueKey' }], isError: false }
       },
     })
     await $.session.start(SESSION)
     await $.command.run({ ...RUN, args: 'DEMO-1' })
 
-    expect(kept.mcpCalls.map((call) => Object.keys(call.args)[0])).toEqual(['issueKey', 'issueIdOrKey'])
-    expect(textOf(await $.ui.render(PANE))).toContain('DEMO-1 via issueIdOrKey')
+    expect(kept.mcpCalls.map((call) => Object.keys(call.args)[0])).toEqual(['issueIdOrKey', 'issueKey'])
+    expect(textOf(await $.ui.render(PANE))).toContain('DEMO-1 via issueKey')
   })
 
   test('every argument name failing shows the last error text, unchanged', async ($, on) => {
@@ -198,8 +246,8 @@ describe('mod', () => {
     world(on, {
       tools: TOOLS,
       mcp: ({ args }) => {
-        if (args['issueKey'] === 'DEMO-1') return new Promise<McpToolResult>((resolve) => resolvers.push(resolve))
-        return { content: [{ type: 'text', text: `${String(args['issueKey'])}: content` }], isError: false }
+        if (args['issueIdOrKey'] === 'DEMO-1') return new Promise<McpToolResult>((resolve) => resolvers.push(resolve))
+        return { content: [{ type: 'text', text: `${String(args['issueIdOrKey'])}: content` }], isError: false }
       },
     })
     await $.session.start(SESSION)
@@ -255,7 +303,7 @@ describe('mod', () => {
     await $.command.run({ ...RUN, args: 'DEMO-1' })
 
     expect(kept.toolListCalls).toBe(0)
-    expect(kept.mcpCalls).toEqual([{ server: 'x', tool: 'y', args: { issueKey: 'DEMO-1' } }])
+    expect(kept.mcpCalls).toEqual([{ server: 'x', tool: 'y', args: { issueIdOrKey: 'DEMO-1', responseContentFormat: 'markdown' } }])
   })
 
   test('a config already in the store applies from session.start, with no /jira config command', async ($, on) => {
@@ -264,7 +312,62 @@ describe('mod', () => {
     await $.command.run({ ...RUN, args: 'DEMO-1' })
 
     expect(kept.toolListCalls).toBe(0)
-    expect(kept.mcpCalls).toEqual([{ server: 'x', tool: 'y', args: { issueKey: 'DEMO-1' } }])
+    expect(kept.mcpCalls).toEqual([{ server: 'x', tool: 'y', args: { issueIdOrKey: 'DEMO-1', responseContentFormat: 'markdown' } }])
+  })
+
+  test('/jira config server=<s> tool=<t> cloud=<id> pins the cloud site and skips getAccessibleAtlassianResources', async ($, on) => {
+    const kept = world(on, { tools: TOOLS_WITH_RESOURCES, mcp: ({ tool }) => (tool === 'getJiraIssue' ? SUCCESS_RESULT : { content: [], isError: true }) })
+    await $.session.start(SESSION)
+
+    await $.command.run({ ...RUN, args: 'config server=atlassian tool=getJiraIssue cloud=pinned-site-id' })
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    expect(kept.toolListCalls).toBe(0)
+    expect(kept.mcpCalls).toEqual([
+      { server: 'atlassian', tool: 'getJiraIssue', args: { issueIdOrKey: 'DEMO-1', cloudId: 'pinned-site-id', responseContentFormat: 'markdown' } },
+    ])
+  })
+
+  test('resolves the cloud site through getAccessibleAtlassianResources when exactly one is accessible', async ($, on) => {
+    const kept = world(on, {
+      tools: TOOLS_WITH_RESOURCES,
+      mcp: ({ tool }) => {
+        if (tool === 'getAccessibleAtlassianResources') {
+          return { content: [{ type: 'text', text: JSON.stringify([{ id: 'site-id', url: 'https://example.atlassian.net', name: 'Example' }]) }], isError: false }
+        }
+        return SUCCESS_RESULT
+      },
+    })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    expect(kept.mcpCalls).toEqual([
+      { server: 'atlassian', tool: 'getAccessibleAtlassianResources', args: {} },
+      { server: 'atlassian', tool: 'getJiraIssue', args: { issueIdOrKey: 'DEMO-1', cloudId: 'site-id', responseContentFormat: 'markdown' } },
+    ])
+  })
+
+  test('more than one accessible Atlassian site shows each and never calls the issue tool', async ($, on) => {
+    const kept = world(on, {
+      tools: TOOLS_WITH_RESOURCES,
+      mcp: ({ tool }) => {
+        if (tool === 'getAccessibleAtlassianResources') {
+          return {
+            content: [{ type: 'text', text: JSON.stringify([{ id: 'site-a', url: 'https://a.atlassian.net' }, { id: 'site-b', url: 'https://b.atlassian.net' }]) }],
+            isError: false,
+          }
+        }
+        return SUCCESS_RESULT
+      },
+    })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const text = textOf(await $.ui.render(PANE))
+    expect(text).toContain('more than one Atlassian site')
+    expect(text).toContain('site-a')
+    expect(text).toContain('site-b')
+    expect(kept.mcpCalls).toEqual([{ server: 'atlassian', tool: 'getAccessibleAtlassianResources', args: {} }])
   })
 
   describe('fixture mode', () => {
@@ -297,6 +400,41 @@ describe('mod', () => {
 
       const text = textOf(await $.ui.render(PANE))
       expect(text).toContain('could not parse')
+    })
+
+    test('a fixture in the real issue shape draws the summary, status, description and url, and arms both into context', async ($, on) => {
+      world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_RESULT) } })
+      await $.session.start(SESSION)
+      await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+      const text = textOf(await $.ui.render(PANE))
+      expect(text).toContain('Add a setting to turn off notifications')
+      expect(text).toContain('In Progress')
+      expect(text).toContain('設定画面から通知を止められるようにする。')
+      expect(text).toContain('https://example.atlassian.net/browse/DEMO-1')
+
+      await $.ui.press({ plugin: PLUGIN, key: 'arm:button' })
+      await settle()
+      const submitted = await $.prompt.submit({ text: 'what next?', wait: false, origin: { kind: 'composer' } })
+      expect(submitted.context?.[0]).toContain('Add a setting to turn off notifications')
+      expect(submitted.context?.[0]).toContain('設定画面から通知を止められるようにする。')
+    })
+
+    test('a fixture with plain text blocks falls back to drawing the raw blocks', async ($, on) => {
+      const demo2 = JSON.stringify({
+        content: [
+          { type: 'text', text: 'DEMO-2: Sample ticket without structured fields' },
+          { type: 'text', text: 'Plain text description with no JSON payload.' },
+        ],
+        isError: false,
+      })
+      world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-2.json': demo2 } })
+      await $.session.start(SESSION)
+      await $.command.run({ ...RUN, args: 'DEMO-2' })
+
+      const text = textOf(await $.ui.render(PANE))
+      expect(text).toContain('DEMO-2: Sample ticket without structured fields')
+      expect(text).toContain('Plain text description with no JSON payload.')
     })
   })
 
@@ -401,6 +539,89 @@ describe('mod', () => {
       const text = lines.join('\n')
       const room = cutNote.length + 11 + 11
       expect(fittedContextTextOf(text, room)).toBe(`${lines[0]}\n${lines[1]}\n${cutNote}`)
+    })
+
+    test('adfTextOf reads a paragraph, joining its children then ending with a newline', () => {
+      expect(adfTextOf({ type: 'paragraph', content: [{ type: 'text', text: 'one' }, { type: 'text', text: ' two' }] })).toBe('one two\n')
+    })
+
+    test('adfTextOf reads a bullet list as one - led line per list item', () => {
+      const list = {
+        type: 'bulletList',
+        content: [
+          { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }] },
+          { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'second' }] }] },
+        ],
+      }
+      expect(adfTextOf(list)).toBe('- first\n- second\n')
+    })
+
+    test('adfTextOf keeps a paragraph after a list on its own line, not glued to the last item', () => {
+      const doc = {
+        type: 'doc',
+        content: [
+          { type: 'paragraph', content: [{ type: 'text', text: 'before' }] },
+          {
+            type: 'bulletList',
+            content: [{ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'item' }] }] }],
+          },
+          { type: 'paragraph', content: [{ type: 'text', text: 'after' }] },
+        ],
+      }
+      expect(adfTextOf(doc)).toBe('before\n- item\nafter\n')
+    })
+
+    test('adfTextOf reads a hard break as a bare newline', () => {
+      expect(adfTextOf({ type: 'hardBreak' })).toBe('\n')
+    })
+
+    test('adfTextOf passes a plain string through unchanged', () => {
+      expect(adfTextOf('plain text')).toBe('plain text')
+    })
+
+    test('adfTextOf reads null and undefined as an empty string', () => {
+      expect(adfTextOf(null)).toBe('')
+      expect(adfTextOf(undefined)).toBe('')
+    })
+
+    test('issueViewOf reads a matching text block, filling an absent or null field with an empty string', () => {
+      const result: McpToolResult = {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              issues: {
+                nodes: [
+                  {
+                    key: 'DEMO-9',
+                    fields: { summary: 'A summary', status: { name: 'To Do' }, priority: null, assignee: null, description: 'Plain description' },
+                    webUrl: 'https://example.atlassian.net/browse/DEMO-9',
+                  },
+                ],
+              },
+            }),
+          },
+        ],
+        isError: false,
+      }
+      expect(issueViewOf(result)).toEqual({
+        key: 'DEMO-9',
+        summary: 'A summary',
+        type: '',
+        status: 'To Do',
+        priority: '',
+        assignee: '',
+        reporter: '',
+        labels: [],
+        description: 'Plain description',
+        url: 'https://example.atlassian.net/browse/DEMO-9',
+        created: '',
+        updated: '',
+      })
+    })
+
+    test('issueViewOf reads null when no content block matches the issues.nodes shape', () => {
+      expect(issueViewOf(SUCCESS_RESULT)).toBeNull()
     })
   })
 })
