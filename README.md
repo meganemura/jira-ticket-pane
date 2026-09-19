@@ -45,6 +45,8 @@ To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
 - `/jira` with no key toggles the pane's display.
 - The `↻` button refetches the current issue. The plugin polls nothing on a
   timer.
+- The `[issue]` tab shows the summary and the description.
+- The `[meta]` tab shows the fields and, under a fold, the raw JSON.
 - The `attach to next prompt` button arms the issue text. Press it again to
   drop the text. The text drops on its own once a prompt goes out. The
   plugin does not write into the prompt box.
@@ -56,7 +58,6 @@ To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
   model reads the note. The pane does not show it.
 - When even the header does not fit, the plugin drops the attach and
   shows one status line.
-- The issue's structured content sits under a fold.
 - A key matches `[A-Z][A-Z0-9]+-\d+`.
 
 ## `/jira config`
@@ -125,7 +126,7 @@ appears only in `~/.claude/debug/<session>.txt`.
 - It fetches one issue at a time.
 - It does not manage authentication. When the MCP server returns an error,
   the pane shows the server's error text as is.
-- The plugin has run against Atlassian's own MCP server. It draws
-  summary, status, priority, assignee, labels, the description, and the
-  url as their own heading, when the response matches that server's
-  shape. A response in another shape draws as its raw content blocks.
+- The plugin has run against Atlassian's own MCP server. When the
+  response matches that server's shape, the `[issue]` tab draws the
+  summary and the description, and the `[meta]` tab draws the other
+  fields. A response in another shape draws as its raw content blocks.

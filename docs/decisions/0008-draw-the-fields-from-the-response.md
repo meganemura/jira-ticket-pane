@@ -33,9 +33,10 @@ The pane draws a bold `<key> <summary>` heading, a dim
 issue has any, the description, and the url. The armed text that rides a
 prompt draws the same heading and description.
 
-No content block matching `issues.nodes` falls back to `0004`'s block
-drawing. The fold still shows raw JSON either way: `structuredContent`
-when the tool sends one, else the parsed block `issueViewOf` read.
+A response with no issue object in any content block falls back to
+`0004`'s block drawing, with the raw JSON fold below it. In the parsed
+view the same fold sits under the `[meta]` tab. The fold shows
+`structuredContent` when the tool sends one, else the parsed block.
 
 ## Consequences
 
@@ -44,3 +45,12 @@ through the block-drawing fallback; only the confirmed shape gets the
 field-by-field heading. An ADF node type outside `adfTextOf`'s known set
 still reads as text through the generic recursion, keeping the words and
 losing only that node's own structure.
+
+Note, 2026-09-19: a call through `$.mcp.call` answers with the issue
+object itself, `key` and `fields` at the top level, no `issues.nodes`
+wrapper. A model's own tool call still wraps it. `issueJsonOf` and
+`issueViewOf` now read both shapes.
+
+The pane also splits into an `issue` tab and a `meta` tab. Reading the
+summary and the description is a different task from checking the
+issue's state, so the two stay apart.
