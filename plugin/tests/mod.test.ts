@@ -653,13 +653,15 @@ describe('mod', () => {
     expect(lines.find((line) => line.text === '● Done')?.color).toBe('green')
   })
 
-  test('the divider is bodyColumns minus one dashes wide', async ($, on) => {
+  // Both side paddings come off the width: one cell short of that wrapped a `─` onto its own row.
+  test('the divider is bodyColumns minus both side paddings wide', async ($, on) => {
     world(on, { tools: TOOLS, mcp: () => SUCCESS_RESULT })
     await $.session.start(SESSION)
     await $.command.run({ ...RUN, args: 'DEMO-1' })
 
     const text = textOf(await $.ui.render(PANE))
-    expect(text).toContain('─'.repeat(PANE.props.bodyColumns - 1))
+    expect(text).toContain('\n' + '─'.repeat(PANE.props.bodyColumns - 2) + '\n')
+    expect(text).not.toContain('─'.repeat(PANE.props.bodyColumns - 1))
   })
 
   describe('pure functions', () => {

@@ -1,6 +1,6 @@
 {
   "name": "jira-ticket-pane",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A pane beside the transcript that fetches one Jira issue by key and lets you attach it to your next prompt.",
   "author": {
     "name": "meganemura"

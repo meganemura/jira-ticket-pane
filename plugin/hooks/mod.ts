@@ -585,11 +585,15 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, priorCloudId: 
 // hotkey did not fire inside a pane.
 type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Link' | 'Text'>
 
-// Sized to `bodyColumns`, the render input's own cells-across-the-body figure, less the one cell
-// the pane's own `paddingRight` already spends: the same reasoning pull-request-pane's
-// `kindDividerOf` used for its own divider.
+// The pane's own side padding, named once: the divider is sized to `bodyColumns` (the render
+// input's cells-across-the-body figure) less these two cells, or it ends up wider than the
+// content and wraps one `─` onto a second row (real-terminal feedback, after `paddingLeft` was
+// added and only `paddingRight` had been subtracted).
+const PANE_PADDING_LEFT = 1
+const PANE_PADDING_RIGHT = 1
+
 function dividerOf(ui: Ui, bodyColumns: number): RenderElement {
-  return ui.Text({ dimColor: true, children: '─'.repeat(Math.max(bodyColumns - 1, 0)) })
+  return ui.Text({ dimColor: true, children: '─'.repeat(Math.max(bodyColumns - PANE_PADDING_LEFT - PANE_PADDING_RIGHT, 0)) })
 }
 
 // Every state the pane can be in shows this row: the tabs on the left once an issue has parsed
@@ -804,7 +808,7 @@ function paneOf(ui: Ui, state: State, host: Host, bodyColumns: number): RenderEl
   children.push(...errorRowsOf(ui, state))
   children.push(...resultRowsOf(ui, state, host, view))
 
-  return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: 1, paddingLeft: 1, children })
+  return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: PANE_PADDING_RIGHT, paddingLeft: PANE_PADDING_LEFT, children })
 }
 
 // `config server=<s> tool=<t>` pins the MCP tool, so `fetchIssue` skips `tool.list` and calls it
