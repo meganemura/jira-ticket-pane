@@ -46,3 +46,9 @@ lines added recording them, and the default search or the argument order
 can change to match. A server whose tool needs an argument beyond the
 three tried here fails all three calls; the pane's error text is the only
 diagnostic a person has in that case.
+
+Note, 2026-09-19: a session against Atlassian's own MCP server confirmed
+`getJiraIssue`, matching the rule above, with two required arguments,
+`cloudId` and `issueIdOrKey`. The order is now `issueIdOrKey`, `issueKey`,
+`key`. The plugin resolves `cloudId` from the same server's
+`getAccessibleAtlassianResources` tool, or from `/jira config cloud=<id>`.

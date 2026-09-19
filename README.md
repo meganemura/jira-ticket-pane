@@ -75,7 +75,18 @@ connected to the session.
 A pinned value lives in the plugin's own store and outlasts the session.
 
 To call the tool, the plugin tries three argument names in order:
-`issueKey`, `issueIdOrKey`, `key`.
+`issueIdOrKey`, `issueKey`, `key`.
+
+Atlassian's own MCP server also needs a `cloudId`, naming the Atlassian
+cloud site the issue lives on. When the search finds the issue tool on a
+server that also carries a matching site-listing tool, the plugin calls
+that tool once a session. It keeps the id the tool returns. More than
+one accessible site shows an error naming each one, with no call to the
+issue tool.
+
+`/jira config server=<name> tool=<name> cloud=<id>` pins a site by hand.
+Add `cloud=<id>` when a pinned server and tool skip the search: a pinned
+tool never looks for the site-listing tool on its own.
 
 ## Fixture mode
 
@@ -114,6 +125,7 @@ appears only in `~/.claude/debug/<session>.txt`.
 - It fetches one issue at a time.
 - It does not manage authentication. When the MCP server returns an error,
   the pane shows the server's error text as is.
-- The plugin has not run against a real Atlassian MCP server. Rendering
-  fields such as summary, status, and assignee as their own headings
-  waits for a look at that server's response shape.
+- The plugin has run against Atlassian's own MCP server. It draws
+  summary, status, priority, assignee, labels, the description, and the
+  url as their own heading, when the response matches that server's
+  shape. A response in another shape draws as its raw content blocks.
