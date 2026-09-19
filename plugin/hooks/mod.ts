@@ -177,6 +177,9 @@ type IssueView = {
   summary: string
   type: string
   status: string
+  // Read off `fields.status.statusCategory.key`: `''` when the field or the category is absent,
+  // the same rule every other field on this type follows. `statusColorOf` reads this alone.
+  statusCategory: string
   priority: string
   assignee: string
   reporter: string
@@ -185,6 +188,29 @@ type IssueView = {
   url: string
   created: string
   updated: string
+}
+
+// A category maps to the color a Jira board would use for it (new work, work under way, done
+// work); a category this file does not know draws with no color, rather than guessing one.
+export function statusColorOf(category: string): string | undefined {
+  if (category === 'new') return 'blue'
+  if (category === 'indeterminate') return 'yellow'
+  if (category === 'done') return 'green'
+  return undefined
+}
+
+// An ISO timestamp's date and minute, with no seconds and no timezone offset: `2026-09-19
+// 16:32`. A value that does not start with the ISO shape passes through unchanged, so a server
+// sending something else still shows, rather than a mangled cut of it.
+function shortDateOf(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) ? value.slice(0, 16).replace('T', ' ') : value
+}
+
+function statusCategoryKeyOf(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return ''
+  const category = Reflect.get(value, 'statusCategory')
+  if (typeof category !== 'object' || category === null) return ''
+  return stringOf(Reflect.get(category, 'key'))
 }
 
 function stringOf(value: unknown): string {
@@ -228,7 +254,7 @@ export function adfTextOf(node: unknown): string {
       .map((item) => {
         const itemContent = Reflect.get(item, 'content')
         const itemChildren = Array.isArray(itemContent) ? itemContent : []
-        return `- ${itemChildren.map(adfTextOf).join('').trimEnd()}`
+        return `• ${itemChildren.map(adfTextOf).join('').trimEnd()}`
       })
     return `${lines.join('\n')}\n`
   }
@@ -285,6 +311,7 @@ export function issueViewOf(result: McpToolResult): IssueView | null {
     summary: stringOf(Reflect.get(fields, 'summary')),
     type: nameOf(Reflect.get(fields, 'issuetype')),
     status: nameOf(Reflect.get(fields, 'status')),
+    statusCategory: statusCategoryKeyOf(Reflect.get(fields, 'status')),
     priority: nameOf(Reflect.get(fields, 'priority')),
     assignee: displayNameOf(Reflect.get(fields, 'assignee')),
     reporter: displayNameOf(Reflect.get(fields, 'reporter')),
@@ -398,10 +425,16 @@ async function fetchIssue(state: State, key: string): Promise<void> {
   } finally {
     if (seq === state.fetchSeq) {
       state.isLoading = false
-      state.fetchedAt = new Date().toLocaleTimeString()
+      state.fetchedAt = hhmmOf(new Date())
     }
     host.invalidate()
   }
+}
+
+// The clock time the refresh button shows, with the seconds dropped: `13:52`, always two digits
+// each side of the colon.
+function hhmmOf(date: Date): string {
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
 // Fixture mode never calls `mcp.call` or `tool.list`: a fixture stands in for both the
@@ -550,49 +583,93 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, priorCloudId: 
 // no `key` (giving it one drops the whole tree); `Box` and `Button` do. None of this pane's
 // Buttons take a `hotkey`: pull-request-pane tested that prop in a real terminal, and the
 // hotkey did not fire inside a pane.
-type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
+type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Link' | 'Text'>
 
-// The refresh button and, once an issue has landed, the arm button beside it in the same row:
-// arming rides with refreshing at the top of the pane, above the tabs, and stays there whichever
-// tab is open.
-function topRowOf(ui: Ui, state: State, host: Host): RenderElement | null {
-  const key = state.issueKey
-  if (key === null) return null
+// Sized to `bodyColumns`, the render input's own cells-across-the-body figure, less the one cell
+// the pane's own `paddingRight` already spends: the same reasoning pull-request-pane's
+// `kindDividerOf` used for its own divider.
+function dividerOf(ui: Ui, bodyColumns: number): RenderElement {
+  return ui.Text({ dimColor: true, children: '─'.repeat(Math.max(bodyColumns - 1, 0)) })
+}
+
+// Every state the pane can be in shows this row: the tabs on the left once an issue has parsed
+// into fields, the refresh and attach buttons on the right once an issue is loaded. Plain
+// buttons keep the row from reading as boxed chrome sitting over the issue itself.
+function topBarOf(ui: Ui, state: State, host: Host, view: IssueView | null): RenderElement {
   const { Box, Button } = ui
-  const refreshLabel = state.isLoading ? '↻ reading…' : `↻ ${key} ${state.fetchedAt ?? ''}`.trimEnd()
-  const children: RenderElement[] = [
-    Button({ key: 'refresh:button', label: refreshLabel, onPress: () => void fetchIssue(state, key).catch(() => undefined) }),
-  ]
 
-  const result = state.result
-  if (result !== null) {
-    const isArmed = state.armed !== null && state.armed.key === key
-    const armLabel = isArmed ? 'attached: rides your next prompt (press to drop)' : 'attach to next prompt'
-    children.push(
-      Button({
-        key: 'arm:button',
-        label: armLabel,
-        onPress: () => {
-          if (state.armed !== null && state.armed.key === key) {
-            state.armed = null
-            host.status(undefined)
-          } else {
-            state.armed = { key, text: issueTextOf(result) }
-            host.status(`${key} rides your next prompt (press the button again to drop it)`)
-          }
-          host.invalidate()
-        },
-      }),
+  const tabButtons: RenderElement[] =
+    view === null
+      ? []
+      : [
+          Button({
+            key: 'tabs:issue',
+            label: 'issue',
+            plain: true,
+            ...(state.tab === 'issue' ? {} : { dimColor: true }),
+            onPress: () => {
+              state.tab = 'issue'
+              host.invalidate()
+            },
+          }),
+          Button({
+            key: 'tabs:meta',
+            label: 'meta',
+            plain: true,
+            ...(state.tab === 'meta' ? {} : { dimColor: true }),
+            onPress: () => {
+              state.tab = 'meta'
+              host.invalidate()
+            },
+          }),
+        ]
+
+  const rightButtons: RenderElement[] = []
+  const key = state.issueKey
+  if (key !== null) {
+    const refreshLabel = state.isLoading ? '↻ …' : `↻ ${state.fetchedAt ?? ''}`.trimEnd()
+    rightButtons.push(
+      Button({ key: 'refresh:button', label: refreshLabel, plain: true, dimColor: true, onPress: () => void fetchIssue(state, key).catch(() => undefined) }),
     )
+
+    const result = state.result
+    if (result !== null) {
+      const isArmed = state.armed !== null && state.armed.key === key
+      rightButtons.push(
+        Button({
+          key: 'arm:button',
+          label: isArmed ? 'attached ✓' : 'attach',
+          plain: true,
+          onPress: () => {
+            if (state.armed !== null && state.armed.key === key) {
+              state.armed = null
+              host.status(undefined)
+            } else {
+              state.armed = { key, text: issueTextOf(result) }
+              host.status(`${key} rides your next prompt (press the button again to drop it)`)
+            }
+            host.invalidate()
+          },
+        }),
+      )
+    }
   }
 
-  return Box({ key: 'refresh', flexDirection: 'row', columnGap: 1, children })
+  return Box({
+    key: 'topbar',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    children: [
+      Box({ key: 'tabs', flexDirection: 'row', columnGap: 1, children: tabButtons }),
+      Box({ key: 'topbar-right', flexDirection: 'row', columnGap: 1, children: rightButtons }),
+    ],
+  })
 }
 
 function errorRowsOf(ui: Ui, state: State): RenderElement[] {
   if (state.error === null) return []
   const { Text } = ui
-  const rows: RenderElement[] = [Text({ color: 'red', children: state.error })]
+  const rows: RenderElement[] = [Text({ color: 'red', children: `✗ ${state.error}` })]
   if (state.lastCall !== null) rows.push(Text({ dimColor: true, children: `called ${state.lastCall}` }))
   if (state.toolNames.length > 0) {
     rows.push(Text({ dimColor: true, children: 'connected MCP tools:' }))
@@ -603,84 +680,59 @@ function errorRowsOf(ui: Ui, state: State): RenderElement[] {
   return rows
 }
 
-// The `issue` tab reads for the summary and the description; the `meta` tab checks the issue's
-// state. Two different reading tasks, kept on separate screens instead of crowding one. `Button`
-// carries no `bold` prop, so the selected tab keeps its brackets (`[issue]`) and the other one
-// loses them (` meta `), telling the two apart.
-function tabRowOf(ui: Ui, state: State, host: Host): RenderElement {
-  const { Box, Button } = ui
-  return Box({
-    key: 'tabs',
-    flexDirection: 'row',
-    columnGap: 1,
-    children: [
-      Button({
-        key: 'tabs:issue',
-        label: state.tab === 'issue' ? '[issue]' : ' issue ',
-        onPress: () => {
-          state.tab = 'issue'
-          host.invalidate()
-        },
-      }),
-      Button({
-        key: 'tabs:meta',
-        label: state.tab === 'meta' ? '[meta]' : ' meta ',
-        onPress: () => {
-          state.tab = 'meta'
-          host.invalidate()
-        },
-      }),
-    ],
-  })
-}
-
-// The `issue` tab: a bold `<key> <summary>` heading, a blank row, then the description (or
-// `(no description)` dim, when the issue has none).
-function issueTabRowsOf(ui: Ui, view: IssueView): RenderElement[] {
-  const { Text } = ui
-  return [
-    Text({ bold: true, children: `${view.key} ${view.summary}` }),
-    view.description !== '' ? Text({ children: view.description }) : Text({ dimColor: true, children: '(no description)' }),
-  ]
-}
-
-// The `meta` tab: one `<label>: <value>` line per field, an empty one dropped. Assignee always
-// shows, `unassigned` standing in for an empty one.
-function metaTabRowsOf(ui: Ui, view: IssueView): RenderElement[] {
-  const { Text } = ui
-  const lines: [string, string][] = [
-    ['type', view.type],
-    ['status', view.status],
-    ['priority', view.priority],
-    ['assignee', view.assignee !== '' ? view.assignee : 'unassigned'],
-    ['reporter', view.reporter],
-    ['labels', view.labels.join(', ')],
-    ['created', view.created],
-    ['updated', view.updated],
-    ['url', view.url],
-  ]
-  return lines.filter(([, value]) => value !== '').map(([label, value]) => Text({ children: `${label}: ${value}` }))
-}
-
-// A parsed `IssueView` draws its selected tab's rows; the fold sits under the `meta` tab alone,
-// once fields already have a tab of their own to draw the raw JSON under. Otherwise (no parsed
-// view: an older or a different server's answer) every `text` content block draws as its own
-// row, unchanged from before field-by-field rendering existed, and the fold keeps showing there
-// too, since that shape draws no tabs to hold it.
-function resultRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
-  const result = state.result
-  if (result === null) return []
+// Common to both tabs: a `<key> <summary>` heading, then the status dot (colored by category),
+// the type, the priority when the issue has one, and the assignee. Reading the state this way
+// needs no tab switch, so a press to see `raw json` is the only reason to leave the issue tab.
+function headerRowsOf(ui: Ui, view: IssueView): RenderElement {
   const { Box, Text } = ui
-  const view = issueViewOf(result)
-  const rows: RenderElement[] = []
-  if (view !== null) {
-    rows.push(Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: state.tab === 'meta' ? metaTabRowsOf(ui, view) : issueTabRowsOf(ui, view) }))
-  } else {
-    const blocks = result.content.map((block) => (block.type === 'text' ? Text({ children: block.text ?? '' }) : Text({ dimColor: true, children: `[${block.type} block]` })))
-    rows.push(Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: blocks }))
-  }
-  if (view === null || state.tab === 'meta') rows.push(...structuredRowsOf(ui, state, host))
-  return rows
+  const statusColor = statusColorOf(view.statusCategory)
+
+  const identityRow = Box({
+    flexDirection: 'row',
+    columnGap: 2,
+    children: [Text({ color: 'cyan', bold: true, children: view.key }), Text({ bold: true, children: view.summary })],
+  })
+
+  const stateRowChildren: RenderElement[] = [
+    Text({ ...(statusColor === undefined ? {} : { color: statusColor }), children: `● ${view.status}` }),
+    Text({ dimColor: true, children: view.type }),
+  ]
+  if (view.priority !== '') stateRowChildren.push(Text({ dimColor: true, children: view.priority }))
+  stateRowChildren.push(Text({ dimColor: true, children: view.assignee !== '' ? view.assignee : 'unassigned' }))
+  const stateRow = Box({ flexDirection: 'row', columnGap: 3, children: stateRowChildren })
+
+  return Box({ flexDirection: 'column', children: [identityRow, stateRow] })
+}
+
+// One `<label>  <value>` row per field, a label padded to line the values up, an empty value
+// dropped (assignee excepted: `unassigned` always shows). The url row alone carries a `key`, the
+// keyed Box a `Link`'s `hover` needs to take effect.
+function metaLinesOf(ui: Ui, view: IssueView): RenderElement {
+  const { Box, Link, Text } = ui
+  const rows: { label: string; value: string; isUrl?: true }[] = [
+    { label: 'type', value: view.type },
+    { label: 'status', value: view.status },
+    { label: 'priority', value: view.priority },
+    { label: 'assignee', value: view.assignee !== '' ? view.assignee : 'unassigned' },
+    { label: 'reporter', value: view.reporter },
+    { label: 'labels', value: view.labels.join(', ') },
+    { label: 'created', value: shortDateOf(view.created) },
+    { label: 'updated', value: shortDateOf(view.updated) },
+    { label: 'url', value: view.url, isUrl: true },
+  ]
+
+  const children = rows
+    .filter((row) => row.value !== '')
+    .map((row) => {
+      const valueElement = row.isUrl === true ? Link({ href: row.value, children: [Text({ hover: { color: 'cyan' }, children: row.value })] }) : Text({ children: row.value })
+      return Box({
+        ...(row.isUrl === true ? { key: 'meta:url' } : {}),
+        flexDirection: 'row',
+        children: [Text({ dimColor: true, children: row.label.padEnd(11) }), valueElement],
+      })
+    })
+
+  return Box({ key: 'meta-lines', flexDirection: 'column', children })
 }
 
 // The fold's raw JSON: `structuredContent` when the tool sent one, else the text block
@@ -703,7 +755,9 @@ function structuredRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
       children: [
         Button({
           key: 'structured:button',
-          label: isOpen ? '▼ structured content' : '▶ structured content',
+          label: isOpen ? '▼ raw json' : '▶ raw json',
+          plain: true,
+          dimColor: true,
           onPress: () => {
             state.isStructuredOpen = !state.isStructuredOpen
             host.invalidate()
@@ -716,22 +770,41 @@ function structuredRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
   return rows
 }
 
-function paneOf(ui: Ui, state: State, host: Host): RenderElement {
+// A parsed `IssueView` draws the shared header, then its selected tab's body: the description on
+// `issue`, the field list and the raw-json fold on `meta`. Otherwise (no parsed view: an older or
+// a different server's answer) every `text` content block draws as its own row, unchanged from
+// before field-by-field rendering existed, with the fold under it.
+function resultRowsOf(ui: Ui, state: State, host: Host, view: IssueView | null): RenderElement[] {
+  const result = state.result
+  if (result === null) return []
   const { Box, Text } = ui
-  const children: RenderElement[] = []
 
-  const topRow = topRowOf(ui, state, host)
-  if (topRow !== null) children.push(topRow)
-  if (state.issueKey === null && state.error === null) children.push(Text({ children: 'type /jira <KEY> to show an issue' }))
+  if (view !== null) {
+    const header = headerRowsOf(ui, view)
+    const body: RenderElement =
+      state.tab === 'issue'
+        ? view.description !== ''
+          ? Text({ children: view.description })
+          : Text({ dimColor: true, children: '(no description)' })
+        : Box({ key: 'meta', flexDirection: 'column', rowGap: 1, children: [metaLinesOf(ui, view), ...structuredRowsOf(ui, state, host)] })
+    return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: [header, body] })]
+  }
+
+  const blocks = result.content.map((block) => (block.type === 'text' ? Text({ children: block.text ?? '' }) : Text({ dimColor: true, children: `[${block.type} block]` })))
+  return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: blocks }), ...structuredRowsOf(ui, state, host)]
+}
+
+function paneOf(ui: Ui, state: State, host: Host, bodyColumns: number): RenderElement {
+  const { Box, Text } = ui
+  const view = state.result !== null ? issueViewOf(state.result) : null
+  const children: RenderElement[] = [topBarOf(ui, state, host, view), dividerOf(ui, bodyColumns)]
+
+  if (state.issueKey === null && state.error === null) children.push(Text({ dimColor: true, children: 'type /jira <KEY> to show an issue' }))
 
   children.push(...errorRowsOf(ui, state))
+  children.push(...resultRowsOf(ui, state, host, view))
 
-  const view = state.result !== null ? issueViewOf(state.result) : null
-  if (view !== null) children.push(tabRowOf(ui, state, host))
-
-  children.push(...resultRowsOf(ui, state, host))
-
-  return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: 1, children })
+  return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: 1, paddingLeft: 1, children })
 }
 
 // `config server=<s> tool=<t>` pins the MCP tool, so `fetchIssue` skips `tool.list` and calls it
@@ -847,8 +920,8 @@ export function register(on: On) {
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || state.host === null) return next(e)
     if (e.surface !== 'terminal') return next(e)
-    const { Box, Button, Text } = await $.ui.resolve(e)
-    return paneOf({ Box, Button, Text }, state, state.host)
+    const { Box, Button, Link, Text } = await $.ui.resolve(e)
+    return paneOf({ Box, Button, Link, Text }, state, state.host, e.props.bodyColumns)
   })
 
   on('ui.close', { id: PANE_ID }, async ($, e, next) => {

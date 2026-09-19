@@ -7,7 +7,7 @@
 import type { CommandRunInput, McpToolResult, On, RenderInput, ToolInfo } from 'claude-code'
 import { describe, expect, mock, test, tier } from 'claude-code/testing'
 
-import { adfTextOf, contextTextOf, discoverTool, fittedContextTextOf, issueTextOf, issueViewOf } from '../hooks/mod'
+import { adfTextOf, contextTextOf, discoverTool, fittedContextTextOf, issueTextOf, issueViewOf, statusColorOf } from '../hooks/mod'
 
 tier('user')
 
@@ -208,7 +208,10 @@ function world(on: On, options: WorldOptions = {}) {
   }
 }
 
-// The strings a drawn tree carries: a Text's joined children, a Button's label.
+// The strings a drawn tree carries: a Text's joined children, a Button's label. A `row` Box's
+// children join edge to edge, with no separator of their own (a real terminal row lays its
+// children on the same line); every other Box joins its children one per line, the same as an
+// array of siblings does.
 function textOf(tree: unknown): string {
   if (Array.isArray(tree)) return tree.map(textOf).join('\n')
   if (typeof tree !== 'object' || tree === null) return ''
@@ -222,7 +225,55 @@ function textOf(tree: unknown): string {
     const label = typeof props === 'object' && props ? Reflect.get(props, 'label') : undefined
     return typeof label === 'string' ? label : ''
   }
+  if (type === 'Box') {
+    const flexDirection = typeof props === 'object' && props ? Reflect.get(props, 'flexDirection') : undefined
+    if (flexDirection === 'row') return (Array.isArray(children) ? children : []).map(textOf).join('')
+  }
   return textOf(children)
+}
+
+// Every Text node in a drawn tree, each with the color it set (absent when it set none).
+function coloredLinesOf(tree: unknown): { text: string; color?: string }[] {
+  if (Array.isArray(tree)) return tree.flatMap(coloredLinesOf)
+  if (typeof tree !== 'object' || tree === null) return []
+  const type: unknown = Reflect.get(tree, 'type')
+  const props: unknown = Reflect.get(tree, 'props')
+  const children: unknown = Reflect.get(tree, 'children')
+  if (type === 'Text') {
+    const text = (Array.isArray(children) ? children : []).filter((child): child is string => typeof child === 'string').join('')
+    const color = typeof props === 'object' && props ? Reflect.get(props, 'color') : undefined
+    return [{ text, ...(typeof color === 'string' ? { color } : {}) }]
+  }
+  return coloredLinesOf(children)
+}
+
+// Every Link in a drawn tree: where it goes, and the text inside it.
+function linksOf(tree: unknown): { href: string; text: string }[] {
+  if (Array.isArray(tree)) return tree.flatMap(linksOf)
+  if (typeof tree !== 'object' || tree === null) return []
+  const type: unknown = Reflect.get(tree, 'type')
+  const props: unknown = Reflect.get(tree, 'props')
+  const children: unknown = Reflect.get(tree, 'children')
+  if (type === 'Link') {
+    const href = typeof props === 'object' && props ? Reflect.get(props, 'href') : undefined
+    return [{ href: typeof href === 'string' ? href : '', text: textOf(children) }]
+  }
+  return linksOf(children)
+}
+
+// Every Button in a drawn tree, each with its own key and label.
+function buttonsOf(tree: unknown): { key: string; label: string }[] {
+  if (Array.isArray(tree)) return tree.flatMap(buttonsOf)
+  if (typeof tree !== 'object' || tree === null) return []
+  const type: unknown = Reflect.get(tree, 'type')
+  const props: unknown = Reflect.get(tree, 'props')
+  const children: unknown = Reflect.get(tree, 'children')
+  if (type === 'Button') {
+    const key = typeof props === 'object' && props ? Reflect.get(props, 'key') : undefined
+    const label = typeof props === 'object' && props ? Reflect.get(props, 'label') : undefined
+    return [{ key: typeof key === 'string' ? key : '', label: typeof label === 'string' ? label : '' }]
+  }
+  return buttonsOf(children)
 }
 
 // A Button's `onPress` is not awaited by `$.ui.press`; it finishes after a few turns of the
@@ -457,24 +508,28 @@ describe('mod', () => {
       expect(submitted.context?.[0]).toContain('設定画面から通知を止められるようにする。')
     })
 
-    test('a fixture in the flat $.mcp.call shape draws the summary on the issue tab and the status on the meta tab', async ($, on) => {
+    test('a fixture in the flat $.mcp.call shape draws the description on the issue tab and the status on the meta tab', async ($, on) => {
       world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_FLAT_RESULT) } })
       await $.session.start(SESSION)
       await $.command.run({ ...RUN, args: 'DEMO-1' })
 
       const issueText = textOf(await $.ui.render(PANE))
       expect(issueText).toContain('Add a setting to turn off notifications')
-      expect(issueText).not.toContain('status: ')
+      expect(issueText).toContain('Add a toggle to the settings screen that turns notifications off.')
+      expect(issueText).not.toContain(`${'status'.padEnd(11)}In Progress`)
 
       await $.ui.press({ plugin: PLUGIN, key: 'tabs:meta' })
       const metaText = textOf(await $.ui.render(PANE))
-      expect(metaText).toContain('status: In Progress')
-      expect(metaText).toContain('url: https://example.atlassian.net/browse/DEMO-1')
-      expect(metaText).not.toContain('Add a setting to turn off notifications')
+      expect(metaText).toContain('Add a setting to turn off notifications')
+      expect(metaText).toContain(`${'status'.padEnd(11)}In Progress`)
+      expect(metaText).not.toContain('Add a toggle to the settings screen that turns notifications off.')
+
+      const link = linksOf(await $.ui.render(PANE)).find((entry) => entry.href === 'https://example.atlassian.net/browse/DEMO-1')
+      expect(link?.text).toBe('https://example.atlassian.net/browse/DEMO-1')
 
       await $.ui.press({ plugin: PLUGIN, key: 'tabs:issue' })
       const backText = textOf(await $.ui.render(PANE))
-      expect(backText).toContain('Add a setting to turn off notifications')
+      expect(backText).toContain('Add a toggle to the settings screen that turns notifications off.')
     })
 
     test('a fixture with plain text blocks falls back to drawing the raw blocks', async ($, on) => {
@@ -556,7 +611,66 @@ describe('mod', () => {
     expect(expanded).toContain('"key": "DEMO-1"')
   })
 
+  test('the top bar draws the tab, refresh and attach buttons with their labels', async ($, on) => {
+    world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_FLAT_RESULT) } })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const before = buttonsOf(await $.ui.render(PANE))
+    expect(before).toContainEqual({ key: 'tabs:issue', label: 'issue' })
+    expect(before).toContainEqual({ key: 'tabs:meta', label: 'meta' })
+    expect(before).toContainEqual({ key: 'arm:button', label: 'attach' })
+    expect(before.find((button) => button.key === 'refresh:button')?.label).toMatch(/^↻ \d{2}:\d{2}$/)
+
+    await $.ui.press({ plugin: PLUGIN, key: 'arm:button' })
+    await settle()
+    const after = buttonsOf(await $.ui.render(PANE))
+    expect(after).toContainEqual({ key: 'arm:button', label: 'attached ✓' })
+  })
+
+  test('the header draws the key, the summary, and the status dot colored by category', async ($, on) => {
+    const newIssue = { key: 'DEMO-1', fields: { summary: 'A summary', status: { name: 'To Do', statusCategory: { key: 'new' } } } }
+    world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(newIssue) }], isError: false }) } })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const text = textOf(await $.ui.render(PANE))
+    expect(text).toContain('DEMO-1')
+    expect(text).toContain('A summary')
+    expect(text).toContain('● To Do')
+
+    const lines = coloredLinesOf(await $.ui.render(PANE))
+    expect(lines.find((line) => line.text === '● To Do')?.color).toBe('blue')
+  })
+
+  test('the status dot colors done work green, distinct from new work', async ($, on) => {
+    const doneIssue = { key: 'DEMO-2', fields: { summary: 'A summary', status: { name: 'Done', statusCategory: { key: 'done' } } } }
+    world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-2.json': JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(doneIssue) }], isError: false }) } })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-2' })
+
+    const lines = coloredLinesOf(await $.ui.render(PANE))
+    expect(lines.find((line) => line.text === '● Done')?.color).toBe('green')
+  })
+
+  test('the divider is bodyColumns minus one dashes wide', async ($, on) => {
+    world(on, { tools: TOOLS, mcp: () => SUCCESS_RESULT })
+    await $.session.start(SESSION)
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const text = textOf(await $.ui.render(PANE))
+    expect(text).toContain('─'.repeat(PANE.props.bodyColumns - 1))
+  })
+
   describe('pure functions', () => {
+    test('statusColorOf maps a known category to its color, an unknown one to none', () => {
+      expect(statusColorOf('new')).toBe('blue')
+      expect(statusColorOf('indeterminate')).toBe('yellow')
+      expect(statusColorOf('done')).toBe('green')
+      expect(statusColorOf('')).toBeUndefined()
+      expect(statusColorOf('unknown')).toBeUndefined()
+    })
+
     test('discoverTool cuts a tool name at the first __, not every one', () => {
       const tools: ToolInfo[] = [{ name: 'mcp__atlassian__jira_issue__get', description: '', mcp: true }]
       expect(discoverTool(tools)).toEqual({ server: 'atlassian', tool: 'jira_issue__get' })
@@ -602,7 +716,7 @@ describe('mod', () => {
       expect(adfTextOf({ type: 'paragraph', content: [{ type: 'text', text: 'one' }, { type: 'text', text: ' two' }] })).toBe('one two\n')
     })
 
-    test('adfTextOf reads a bullet list as one - led line per list item', () => {
+    test('adfTextOf reads a bullet list as one • led line per list item', () => {
       const list = {
         type: 'bulletList',
         content: [
@@ -610,7 +724,7 @@ describe('mod', () => {
           { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'second' }] }] },
         ],
       }
-      expect(adfTextOf(list)).toBe('- first\n- second\n')
+      expect(adfTextOf(list)).toBe('• first\n• second\n')
     })
 
     test('adfTextOf keeps a paragraph after a list on its own line, not glued to the last item', () => {
@@ -625,7 +739,7 @@ describe('mod', () => {
           { type: 'paragraph', content: [{ type: 'text', text: 'after' }] },
         ],
       }
-      expect(adfTextOf(doc)).toBe('before\n- item\nafter\n')
+      expect(adfTextOf(doc)).toBe('before\n• item\nafter\n')
     })
 
     test('adfTextOf reads a hard break as a bare newline', () => {
@@ -666,6 +780,7 @@ describe('mod', () => {
         summary: 'A summary',
         type: '',
         status: 'To Do',
+        statusCategory: '',
         priority: '',
         assignee: '',
         reporter: '',
