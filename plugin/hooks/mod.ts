@@ -73,6 +73,9 @@ type State = {
   isStructuredOpen: boolean
   armed: Armed | null
   fetchSeq: number
+  // Which of the two tabs the pane draws. Stays as the person left it across a refetch or a new
+  // key: no reset to `'issue'` on a fresh fetch.
+  tab: 'issue' | 'meta'
   // The Atlassian cloud site id, resolved once per session through
   // `getAccessibleAtlassianResources` and kept here for every later fetch; never written to the
   // store, since a pin belongs to `/jira config cloud=<id>` alone.
@@ -232,9 +235,26 @@ export function adfTextOf(node: unknown): string {
   return children.map(adfTextOf).join('')
 }
 
-// The first text content block that parses as JSON shaped like Atlassian's own MCP server
-// answers with, `{ issues: { nodes: [...] } }`, `null` when no block parses that way (an older
-// or a different server's plain-text answer, for instance).
+// One issue, read off `parsed`: wrapped in `{ issues: { nodes: [...] } }` (a model's own tool
+// call answers this way), or the issue object itself with `key` and `fields` at the top level (a
+// call made through `$.mcp.call` from inside this module answers this way, with no wrapper).
+// `null` when `parsed` carries neither shape.
+function issueNodeOf(parsed: unknown): unknown | null {
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const issues = Reflect.get(parsed, 'issues')
+  if (typeof issues === 'object' && issues !== null) {
+    const nodes = Reflect.get(issues, 'nodes')
+    if (Array.isArray(nodes) && nodes.length > 0) return nodes[0]
+  }
+  const key = Reflect.get(parsed, 'key')
+  const fields = Reflect.get(parsed, 'fields')
+  if (typeof key === 'string' && typeof fields === 'object' && fields !== null) return parsed
+  return null
+}
+
+// The first text content block that parses as JSON carrying an issue, wrapped or not (see
+// `issueNodeOf`); `null` when no block parses as either shape (an older or a different server's
+// plain-text answer, for instance).
 function issueJsonOf(result: McpToolResult): unknown | null {
   for (const block of result.content) {
     if (block.type !== 'text' || typeof block.text !== 'string') continue
@@ -244,23 +264,17 @@ function issueJsonOf(result: McpToolResult): unknown | null {
     } catch {
       continue
     }
-    if (typeof parsed !== 'object' || parsed === null) continue
-    const issues = Reflect.get(parsed, 'issues')
-    if (typeof issues !== 'object' || issues === null) continue
-    const nodes = Reflect.get(issues, 'nodes')
-    if (!Array.isArray(nodes) || nodes.length === 0) continue
-    return parsed
+    if (issueNodeOf(parsed) !== null) return parsed
   }
   return null
 }
 
-// `issueJsonOf`'s `{ issues: { nodes: [...] } }`, read into an `IssueView`; `null` when no
-// content block carries that shape, so the caller falls back to drawing the raw blocks.
+// `issueJsonOf`'s issue, read into an `IssueView`; `null` when no content block carries either
+// known shape, so the caller falls back to drawing the raw blocks.
 export function issueViewOf(result: McpToolResult): IssueView | null {
   const parsed = issueJsonOf(result)
   if (parsed === null) return null
-  const nodes = Reflect.get(Reflect.get(parsed as object, 'issues') as object, 'nodes') as unknown[]
-  const node = nodes[0]
+  const node = issueNodeOf(parsed)
   if (typeof node !== 'object' || node === null) return null
   const fieldsRaw = Reflect.get(node, 'fields')
   const fields = typeof fieldsRaw === 'object' && fieldsRaw !== null ? fieldsRaw : {}
@@ -278,6 +292,9 @@ export function issueViewOf(result: McpToolResult): IssueView | null {
     // Trimmed: every block-level node in adfTextOf ends its own line with a newline, so the
     // last block of a description leaves one trailing behind with nothing after it.
     description: adfTextOf(Reflect.get(fields, 'description')).trimEnd(),
+    // `webUrl` alone: a call through `$.mcp.call` carries `self`, an api.atlassian.com API link
+    // with no site name in it, so there is no host to build a browse url from when `webUrl` is
+    // absent.
     url: stringOf(Reflect.get(node, 'webUrl')),
     created: stringOf(Reflect.get(fields, 'created')),
     updated: stringOf(Reflect.get(fields, 'updated')),
@@ -535,12 +552,41 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, priorCloudId: 
 // hotkey did not fire inside a pane.
 type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Text'>
 
-function refreshRowOf(ui: Ui, state: State): RenderElement | null {
+// The refresh button and, once an issue has landed, the arm button beside it in the same row:
+// arming rides with refreshing at the top of the pane, above the tabs, and stays there whichever
+// tab is open.
+function topRowOf(ui: Ui, state: State, host: Host): RenderElement | null {
   const key = state.issueKey
   if (key === null) return null
   const { Box, Button } = ui
-  const label = state.isLoading ? '↻ reading…' : `↻ ${key} ${state.fetchedAt ?? ''}`.trimEnd()
-  return Box({ key: 'refresh', children: [Button({ key: 'refresh:button', label, onPress: () => void fetchIssue(state, key).catch(() => undefined) })] })
+  const refreshLabel = state.isLoading ? '↻ reading…' : `↻ ${key} ${state.fetchedAt ?? ''}`.trimEnd()
+  const children: RenderElement[] = [
+    Button({ key: 'refresh:button', label: refreshLabel, onPress: () => void fetchIssue(state, key).catch(() => undefined) }),
+  ]
+
+  const result = state.result
+  if (result !== null) {
+    const isArmed = state.armed !== null && state.armed.key === key
+    const armLabel = isArmed ? 'attached: rides your next prompt (press to drop)' : 'attach to next prompt'
+    children.push(
+      Button({
+        key: 'arm:button',
+        label: armLabel,
+        onPress: () => {
+          if (state.armed !== null && state.armed.key === key) {
+            state.armed = null
+            host.status(undefined)
+          } else {
+            state.armed = { key, text: issueTextOf(result) }
+            host.status(`${key} rides your next prompt (press the button again to drop it)`)
+          }
+          host.invalidate()
+        },
+      }),
+    )
+  }
+
+  return Box({ key: 'refresh', flexDirection: 'row', columnGap: 1, children })
 }
 
 function errorRowsOf(ui: Ui, state: State): RenderElement[] {
@@ -557,54 +603,84 @@ function errorRowsOf(ui: Ui, state: State): RenderElement[] {
   return rows
 }
 
-// A parsed `IssueView` draws as a bold heading, the meta line, labels when any, the description
-// (or `(no description)`), then the url. Otherwise every `text` content block draws as its own
-// row, unchanged from before field-by-field rendering existed.
-function resultRowsOf(ui: Ui, state: State): RenderElement[] {
-  const result = state.result
-  if (result === null) return []
-  const { Box, Text } = ui
-  const view = issueViewOf(result)
-  if (view !== null) {
-    const rows: RenderElement[] = [
-      Text({ bold: true, children: `${view.key} ${view.summary}` }),
-      Text({ dimColor: true, children: metaLineOf(view) }),
-    ]
-    if (view.labels.length > 0) rows.push(Text({ dimColor: true, children: `labels: ${view.labels.join(', ')}` }))
-    rows.push(view.description !== '' ? Text({ children: view.description }) : Text({ dimColor: true, children: '(no description)' }))
-    rows.push(Text({ dimColor: true, children: view.url }))
-    return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: rows })]
-  }
-  const blocks = result.content.map((block) => (block.type === 'text' ? Text({ children: block.text ?? '' }) : Text({ dimColor: true, children: `[${block.type} block]` })))
-  return [Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: blocks })]
-}
-
-function armRowOf(ui: Ui, state: State, host: Host): RenderElement | null {
-  const result = state.result
-  const key = state.issueKey
-  if (result === null || key === null) return null
+// The `issue` tab reads for the summary and the description; the `meta` tab checks the issue's
+// state. Two different reading tasks, kept on separate screens instead of crowding one. `Button`
+// carries no `bold` prop, so the selected tab keeps its brackets (`[issue]`) and the other one
+// loses them (` meta `), telling the two apart.
+function tabRowOf(ui: Ui, state: State, host: Host): RenderElement {
   const { Box, Button } = ui
-  const isArmed = state.armed !== null && state.armed.key === key
-  const label = isArmed ? 'attached: rides your next prompt (press to drop)' : 'attach to next prompt'
   return Box({
-    key: 'arm',
+    key: 'tabs',
+    flexDirection: 'row',
+    columnGap: 1,
     children: [
       Button({
-        key: 'arm:button',
-        label,
+        key: 'tabs:issue',
+        label: state.tab === 'issue' ? '[issue]' : ' issue ',
         onPress: () => {
-          if (state.armed !== null && state.armed.key === key) {
-            state.armed = null
-            host.status(undefined)
-          } else {
-            state.armed = { key, text: issueTextOf(result) }
-            host.status(`${key} rides your next prompt (press the button again to drop it)`)
-          }
+          state.tab = 'issue'
+          host.invalidate()
+        },
+      }),
+      Button({
+        key: 'tabs:meta',
+        label: state.tab === 'meta' ? '[meta]' : ' meta ',
+        onPress: () => {
+          state.tab = 'meta'
           host.invalidate()
         },
       }),
     ],
   })
+}
+
+// The `issue` tab: a bold `<key> <summary>` heading, a blank row, then the description (or
+// `(no description)` dim, when the issue has none).
+function issueTabRowsOf(ui: Ui, view: IssueView): RenderElement[] {
+  const { Text } = ui
+  return [
+    Text({ bold: true, children: `${view.key} ${view.summary}` }),
+    view.description !== '' ? Text({ children: view.description }) : Text({ dimColor: true, children: '(no description)' }),
+  ]
+}
+
+// The `meta` tab: one `<label>: <value>` line per field, an empty one dropped. Assignee always
+// shows, `unassigned` standing in for an empty one.
+function metaTabRowsOf(ui: Ui, view: IssueView): RenderElement[] {
+  const { Text } = ui
+  const lines: [string, string][] = [
+    ['type', view.type],
+    ['status', view.status],
+    ['priority', view.priority],
+    ['assignee', view.assignee !== '' ? view.assignee : 'unassigned'],
+    ['reporter', view.reporter],
+    ['labels', view.labels.join(', ')],
+    ['created', view.created],
+    ['updated', view.updated],
+    ['url', view.url],
+  ]
+  return lines.filter(([, value]) => value !== '').map(([label, value]) => Text({ children: `${label}: ${value}` }))
+}
+
+// A parsed `IssueView` draws its selected tab's rows; the fold sits under the `meta` tab alone,
+// once fields already have a tab of their own to draw the raw JSON under. Otherwise (no parsed
+// view: an older or a different server's answer) every `text` content block draws as its own
+// row, unchanged from before field-by-field rendering existed, and the fold keeps showing there
+// too, since that shape draws no tabs to hold it.
+function resultRowsOf(ui: Ui, state: State, host: Host): RenderElement[] {
+  const result = state.result
+  if (result === null) return []
+  const { Box, Text } = ui
+  const view = issueViewOf(result)
+  const rows: RenderElement[] = []
+  if (view !== null) {
+    rows.push(Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: state.tab === 'meta' ? metaTabRowsOf(ui, view) : issueTabRowsOf(ui, view) }))
+  } else {
+    const blocks = result.content.map((block) => (block.type === 'text' ? Text({ children: block.text ?? '' }) : Text({ dimColor: true, children: `[${block.type} block]` })))
+    rows.push(Box({ key: 'result', flexDirection: 'column', rowGap: 1, children: blocks }))
+  }
+  if (view === null || state.tab === 'meta') rows.push(...structuredRowsOf(ui, state, host))
+  return rows
 }
 
 // The fold's raw JSON: `structuredContent` when the tool sent one, else the text block
@@ -644,17 +720,16 @@ function paneOf(ui: Ui, state: State, host: Host): RenderElement {
   const { Box, Text } = ui
   const children: RenderElement[] = []
 
-  const refreshRow = refreshRowOf(ui, state)
-  if (refreshRow !== null) children.push(refreshRow)
+  const topRow = topRowOf(ui, state, host)
+  if (topRow !== null) children.push(topRow)
   if (state.issueKey === null && state.error === null) children.push(Text({ children: 'type /jira <KEY> to show an issue' }))
 
   children.push(...errorRowsOf(ui, state))
-  children.push(...resultRowsOf(ui, state))
 
-  const armRow = armRowOf(ui, state, host)
-  if (armRow !== null) children.push(armRow)
+  const view = state.result !== null ? issueViewOf(state.result) : null
+  if (view !== null) children.push(tabRowOf(ui, state, host))
 
-  children.push(...structuredRowsOf(ui, state, host))
+  children.push(...resultRowsOf(ui, state, host))
 
   return Box({ key: 'jira-ticket-pane', flexDirection: 'column', paddingTop: 1, paddingRight: 1, children })
 }
@@ -713,6 +788,7 @@ export function register(on: On) {
     fetchSeq: 0,
     cloudId: null,
     siteLines: [],
+    tab: 'issue',
   }
 
   // A second `prompt.submit` arriving while the first one's `next` is still in flight must not

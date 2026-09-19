@@ -87,6 +87,45 @@ const DEMO1_ISSUE = {
 
 const DEMO1_RESULT: McpToolResult = { content: [{ type: 'text', text: JSON.stringify(DEMO1_ISSUE) }], isError: false }
 
+// The same issue, in the shape a call through `$.mcp.call` answers with: the issue object
+// itself, `key` and `fields` at the top level, no `issues.nodes` wrapper. `self` carries no site
+// name (unlike `webUrl`), so `issueViewOf` must not build a url from it.
+const DEMO1_ISSUE_FLAT = {
+  expand: 'operations',
+  id: '10000',
+  self: 'https://api.example.invalid/ex/jira/site-id/rest/api/3/issue/10000',
+  key: 'DEMO-1',
+  fields: {
+    summary: 'Add a setting to turn off notifications',
+    issuetype: { name: 'Story' },
+    status: { name: 'In Progress' },
+    priority: { name: 'Medium' },
+    assignee: { displayName: 'Demo User' },
+    reporter: { displayName: 'Demo Reporter' },
+    labels: ['notifications', 'settings'],
+    description: {
+      type: 'doc',
+      version: 1,
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Add a toggle to the settings screen that turns notifications off.' }] },
+        { type: 'paragraph', content: [{ type: 'text', text: '設定画面から通知を止められるようにする。' }] },
+        {
+          type: 'bulletList',
+          content: [
+            { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Add an on/off switch to settings' }] }] },
+            { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: '既定はオンのままにする' }] }] },
+          ],
+        },
+      ],
+    },
+    created: '2026-01-05T09:00:00.000Z',
+    updated: '2026-01-06T10:30:00.000Z',
+  },
+  webUrl: 'https://example.atlassian.net/browse/DEMO-1',
+}
+
+const DEMO1_FLAT_RESULT: McpToolResult = { content: [{ type: 'text', text: JSON.stringify(DEMO1_ISSUE_FLAT) }], isError: false }
+
 type McpCall = { server: string; tool: string; args: Record<string, unknown> }
 
 type WorldOptions = {
@@ -402,22 +441,40 @@ describe('mod', () => {
       expect(text).toContain('could not parse')
     })
 
-    test('a fixture in the real issue shape draws the summary, status, description and url, and arms both into context', async ($, on) => {
+    test('a fixture in the wrapped issues.nodes shape draws the summary and description on the issue tab, and arms both into context', async ($, on) => {
       world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_RESULT) } })
       await $.session.start(SESSION)
       await $.command.run({ ...RUN, args: 'DEMO-1' })
 
       const text = textOf(await $.ui.render(PANE))
       expect(text).toContain('Add a setting to turn off notifications')
-      expect(text).toContain('In Progress')
       expect(text).toContain('設定画面から通知を止められるようにする。')
-      expect(text).toContain('https://example.atlassian.net/browse/DEMO-1')
 
       await $.ui.press({ plugin: PLUGIN, key: 'arm:button' })
       await settle()
       const submitted = await $.prompt.submit({ text: 'what next?', wait: false, origin: { kind: 'composer' } })
       expect(submitted.context?.[0]).toContain('Add a setting to turn off notifications')
       expect(submitted.context?.[0]).toContain('設定画面から通知を止められるようにする。')
+    })
+
+    test('a fixture in the flat $.mcp.call shape draws the summary on the issue tab and the status on the meta tab', async ($, on) => {
+      world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_FLAT_RESULT) } })
+      await $.session.start(SESSION)
+      await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+      const issueText = textOf(await $.ui.render(PANE))
+      expect(issueText).toContain('Add a setting to turn off notifications')
+      expect(issueText).not.toContain('status: ')
+
+      await $.ui.press({ plugin: PLUGIN, key: 'tabs:meta' })
+      const metaText = textOf(await $.ui.render(PANE))
+      expect(metaText).toContain('status: In Progress')
+      expect(metaText).toContain('url: https://example.atlassian.net/browse/DEMO-1')
+      expect(metaText).not.toContain('Add a setting to turn off notifications')
+
+      await $.ui.press({ plugin: PLUGIN, key: 'tabs:issue' })
+      const backText = textOf(await $.ui.render(PANE))
+      expect(backText).toContain('Add a setting to turn off notifications')
     })
 
     test('a fixture with plain text blocks falls back to drawing the raw blocks', async ($, on) => {
@@ -620,8 +677,23 @@ describe('mod', () => {
       })
     })
 
-    test('issueViewOf reads null when no content block matches the issues.nodes shape', () => {
+    test('issueViewOf reads null when no content block matches either shape', () => {
       expect(issueViewOf(SUCCESS_RESULT)).toBeNull()
+    })
+
+    test('issueViewOf reads a flat issue object with no issues.nodes wrapper, the shape $.mcp.call answers with', () => {
+      const view = issueViewOf(DEMO1_FLAT_RESULT)
+      expect(view?.key).toBe('DEMO-1')
+      expect(view?.summary).toBe('Add a setting to turn off notifications')
+      expect(view?.status).toBe('In Progress')
+    })
+
+    test('issueViewOf leaves url empty when the response has no webUrl, even with a self link', () => {
+      const result: McpToolResult = {
+        content: [{ type: 'text', text: JSON.stringify({ key: 'DEMO-2', self: 'https://api.example.invalid/rest/api/3/issue/20000', fields: { summary: 'No url here' } }) }],
+        isError: false,
+      }
+      expect(issueViewOf(result)?.url).toBe('')
     })
   })
 })
