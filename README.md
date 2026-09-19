@@ -21,8 +21,6 @@ claude plugin marketplace add meganemura/jira-ticket-pane
 claude plugin install jira-ticket-pane@jira-ticket-pane
 ```
 
-The repository is private today, so these commands need access to it.
-
 To develop against a checkout, run the plugin from its working tree:
 
 ```sh
