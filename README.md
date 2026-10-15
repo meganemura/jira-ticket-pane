@@ -10,9 +10,9 @@ A button on the pane arms the issue text to ride the next prompt as context.
 
 - Claude Code with function hooks enabled: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
   This is early access. The API can change between releases.
-- CI pins Claude Code version 2.1.273.
+- CI pins Claude Code version 2.1.280.
 - An MCP server connected to the session, with a tool that reads Jira issues.
-- A terminal surface. `-p` has no pane.
+- A terminal session, or the Code tab of Claude Code Desktop. `-p` has no pane.
 
 ## Install
 
@@ -34,6 +34,25 @@ To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
 {
   "env": {
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
+
+### Claude Code Desktop
+
+The pane also draws in the Code tab of Claude Code Desktop. A plugin installed at the user
+scope with the commands above loads there too. `/plugin` does not run in the desktop app: to
+install from the app, click + beside the prompt box, then Plugins, then Add marketplace with
+`meganemura/jira-ticket-pane`, then Add plugin.
+
+The desktop app takes no `--plugin-dir`. To develop against a checkout there, set these in the
+`env` of `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/jira-ticket-pane/plugin",
+    "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
   }
 }
 ```

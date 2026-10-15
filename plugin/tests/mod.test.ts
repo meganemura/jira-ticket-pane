@@ -172,7 +172,7 @@ function world(on: On, options: WorldOptions = {}) {
 
   on('ui.open', ($, e) => {
     opened.push(e.id)
-    return { value: undefined }
+    return { value: { isPlaced: true } }
   })
   on('ui.close', ($, e) => {
     closed.push(e.id)
@@ -812,5 +812,46 @@ describe('mod', () => {
       }
       expect(issueViewOf(result)?.url).toBe('')
     })
+  })
+})
+
+// Claude Code Desktop draws the pane too. The same issue, driven on the desktop surface, must
+// draw the same tree and arm the same context as on the terminal.
+const DESKTOP_PANE: RenderInput<'Pane'> = { ...PANE, surface: 'desktop' }
+
+// A drawn tree as JSON, less each element's `press` handle: the engine numbers handles per
+// render, so two renders of one tree differ there and nowhere else.
+function shapeOf(tree: unknown): string {
+  return JSON.stringify(tree, (key, value: unknown) => (key === 'press' ? undefined : value))
+}
+
+describe('mod on the desktop surface', () => {
+  test('the desktop draws the same tree as the terminal, on both tabs', async ($, on) => {
+    world(on, { env: { JIRA_TICKET_PANE_FIXTURE: '/fx' }, files: { '/fx/DEMO-1.json': JSON.stringify(DEMO1_FLAT_RESULT) } })
+    await $.session.start({ ...SESSION, surface: 'desktop' })
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+
+    const desktop = await $.ui.render(DESKTOP_PANE)
+    expect(textOf(desktop)).toContain('Add a setting to turn off notifications')
+    expect(shapeOf(desktop)).toBe(shapeOf(await $.ui.render(PANE)))
+
+    await $.ui.press({ plugin: PLUGIN, key: 'tabs:meta', surface: 'desktop' })
+    const meta = await $.ui.render(DESKTOP_PANE)
+    expect(textOf(meta)).toContain(`${'status'.padEnd(11)}In Progress`)
+    expect(shapeOf(meta)).toBe(shapeOf(await $.ui.render(PANE)))
+  })
+
+  test('pressing attach on the desktop arms the issue text to ride the next prompt', async ($, on) => {
+    const kept = world(on, { tools: TOOLS, mcp: () => SUCCESS_RESULT })
+    await $.session.start({ ...SESSION, surface: 'desktop' })
+    await $.command.run({ ...RUN, args: 'DEMO-1' })
+    await $.ui.render(DESKTOP_PANE)
+
+    await $.ui.press({ plugin: PLUGIN, key: 'arm:button' })
+    await settle()
+    expect(kept.statuses.at(-1)).toContain('rides your next prompt')
+
+    const first = await $.prompt.submit({ text: 'what does this ask for?', wait: false, origin: { kind: 'composer' } })
+    expect(first.context?.[0]).toContain('DEMO-1: Sample summary')
   })
 })

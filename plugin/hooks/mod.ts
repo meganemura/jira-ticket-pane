@@ -583,7 +583,10 @@ async function fetchFromMcp(host: Host, config: McpConfig | null, priorCloudId: 
 // no `key` (giving it one drops the whole tree); `Box` and `Button` do. None of this pane's
 // Buttons take a `hotkey`: pull-request-pane tested that prop in a real terminal, and the
 // hotkey did not fire inside a pane.
-type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Link' | 'Text'>
+// The pane draws on the terminal and on Claude Code Desktop, so `Ui` holds only what both
+// tables declare. Other surfaces go to `next(e)`.
+type DrawnSurface = 'terminal' | 'desktop'
+type Ui = Pick<Elements[DrawnSurface], 'Box' | 'Button' | 'Link' | 'Text'>
 
 // The pane's own side padding, named once: the divider is sized to `bodyColumns` (the render
 // input's cells-across-the-body figure) less these two cells, or it ends up wider than the
@@ -592,8 +595,10 @@ type Ui = Pick<Elements['terminal'], 'Box' | 'Button' | 'Link' | 'Text'>
 const PANE_PADDING_LEFT = 1
 const PANE_PADDING_RIGHT = 1
 
+// `truncate` because a desktop may paint a cell narrower or wider than the terminal does: a
+// divider a little too long is cut, never wrapped onto a second row.
 function dividerOf(ui: Ui, bodyColumns: number): RenderElement {
-  return ui.Text({ dimColor: true, children: '─'.repeat(Math.max(bodyColumns - PANE_PADDING_LEFT - PANE_PADDING_RIGHT, 0)) })
+  return ui.Text({ dimColor: true, wrap: 'truncate', children: '─'.repeat(Math.max(bodyColumns - PANE_PADDING_LEFT - PANE_PADDING_RIGHT, 0)) })
 }
 
 // Every state the pane can be in shows this row: the tabs on the left once an issue has parsed
@@ -923,7 +928,7 @@ export function register(on: On) {
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID || state.host === null) return next(e)
-    if (e.surface !== 'terminal') return next(e)
+    if (e.surface !== 'terminal' && e.surface !== 'desktop') return next(e)
     const { Box, Button, Link, Text } = await $.ui.resolve(e)
     return paneOf({ Box, Button, Link, Text }, state, state.host, e.props.bodyColumns)
   })
