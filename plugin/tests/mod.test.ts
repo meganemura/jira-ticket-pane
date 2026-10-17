@@ -819,10 +819,12 @@ describe('mod', () => {
 // draw the same tree and arm the same context as on the terminal.
 const DESKTOP_PANE: RenderInput<'Pane'> = { ...PANE, surface: 'desktop' }
 
-// A drawn tree as JSON, less each element's `press` handle: the engine numbers handles per
-// render, so two renders of one tree differ there and nowhere else.
+// A drawn tree as JSON, less each element's `press` handle and `weight`. The engine numbers
+// handles per render, so two renders of one tree differ there. From Claude Code 2.1.299 the
+// desktop tree also carries a `weight` the engine derives from `bold`; the module sets no
+// `weight` itself.
 function shapeOf(tree: unknown): string {
-  return JSON.stringify(tree, (key, value: unknown) => (key === 'press' ? undefined : value))
+  return JSON.stringify(tree, (key, value: unknown) => (key === 'press' || key === 'weight' ? undefined : value))
 }
 
 describe('mod on the desktop surface', () => {
