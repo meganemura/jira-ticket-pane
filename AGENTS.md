@@ -5,7 +5,7 @@ Context for agents that work in this repository.
 ## What this is
 
 jira-ticket-pane, a Claude Code plugin whose behavior lives in one hooks
-module (a "Claude Mod"). `/jira <KEY-123>` fetches one Jira issue through an
+module (a mod). `/jira <KEY-123>` fetches one Jira issue through an
 MCP server the session already has, and draws it in a pane beside the
 transcript. The fetch runs inside the module (`$.mcp.call`), not in a model
 turn. A press on the pane arms the issue text to ride the next prompt as
@@ -23,8 +23,10 @@ site name, or a real issue body. Fixtures use invented keys (`DEMO-1`).
 
 ## Rules
 
-- Function hooks are early access. The module loads only where
-  `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` is set. The API can change between
+- Mods are early access. Claude Code 2.1.287 and later load them by
+  default; CI pins 2.1.280, where the module loads only with
+  `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, so the CI and test commands set
+  it. The API can change between
   releases. The types come from `/plugin-types`, which writes
   `.claude/types/claude-code.d.ts` at the repository root; that directory is
   gitignored, so run `/plugin-types` once in a new checkout.
@@ -44,8 +46,8 @@ site name, or a real issue body. Fixtures use invented keys (`DEMO-1`).
   No test reaches a real MCP server.
 - Quality gates: `claude plugin validate plugin`, `npx -p typescript tsc -p
   plugin/hooks`, and the plugin tests. Run all three before a commit.
-- Development loop: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir
-  "$PWD/plugin"` in a real terminal. `-p` has no pane surface. Hook failures
+- Development loop: `claude --plugin-dir "$PWD/plugin"` in a real
+  terminal. `-p` has no pane surface. Hook failures
   are fail-open and appear only in `~/.claude/debug/<session>.txt`.
 - Design decisions go to `docs/decisions/` as short numbered notes
   (Context / Decision / Consequences).

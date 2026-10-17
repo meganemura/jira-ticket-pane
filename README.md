@@ -1,6 +1,6 @@
 # jira-ticket-pane
 
-A Claude Code plugin (a Claude Mod). `/jira DEMO-1` fetches one Jira issue
+A Claude Code plugin (a mod). `/jira DEMO-1` fetches one Jira issue
 from an MCP server already connected to the session, and draws it in a pane
 beside the transcript. The fetch runs inside the plugin. It never runs as
 part of a model turn.
@@ -8,8 +8,8 @@ A button on the pane arms the issue text to ride the next prompt as context.
 
 ## Requirements
 
-- Claude Code with function hooks enabled: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
-  This is early access. The API can change between releases.
+- Claude Code 2.1.280 or later. Claude Code 2.1.287 and later load mods by default. On an older version, set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
+  Mods are early access. The API can change between releases.
 - CI pins Claude Code version 2.1.280.
 - An MCP server connected to the session, with a tool that reads Jira issues.
 - A terminal session, or the Code tab of Claude Code Desktop. `-p` has no pane.
@@ -24,18 +24,7 @@ claude plugin install jira-ticket-pane@jira-ticket-pane
 To develop against a checkout, run the plugin from its working tree:
 
 ```sh
-CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir /path/to/jira-ticket-pane/plugin
-```
-
-To set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` for each session, add it to the
-`env` of `settings.json`:
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
-  }
-}
+claude --plugin-dir /path/to/jira-ticket-pane/plugin
 ```
 
 ### Claude Code Desktop
@@ -126,7 +115,7 @@ result: a `content` field, an `isError` field, and an optional
 Try it:
 
 ```sh
-JIRA_TICKET_PANE_FIXTURE="$PWD/plugin/tests/fixtures" CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir "$PWD/plugin"
+JIRA_TICKET_PANE_FIXTURE="$PWD/plugin/tests/fixtures" claude --plugin-dir "$PWD/plugin"
 ```
 
 Then, inside the session, run `/jira DEMO-1`.
