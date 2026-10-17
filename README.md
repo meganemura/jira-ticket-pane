@@ -146,3 +146,7 @@ appears only in `~/.claude/debug/<session>.txt`.
   response matches that server's shape, the `issue` tab draws the
   summary and the description, and the `meta` tab draws the other
   fields. A response in another shape draws as its raw content blocks.
+
+---
+
+[Japanese](README.ja.md)

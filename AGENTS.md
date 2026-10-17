@@ -20,6 +20,8 @@ The repository is private today. The layer is public-possible: commit
 messages, comments, README and docs are in English. Follow ASD-STE100
 Simplified Technical English. Never commit a real issue key, a real Jira
 site name, or a real issue body. Fixtures use invented keys (`DEMO-1`).
+`README.ja.md` is the Japanese translation of `README.md`, and the two
+change in the same commit.
 
 ## Rules
 
